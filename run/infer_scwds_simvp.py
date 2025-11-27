@@ -163,7 +163,17 @@ def main():
                 timestamps = metadata.get('timestamps')
                 
                 if not timestamps: continue
-                last_obs_time_str = timestamps[-1]
+                
+                # [关键修正] 获取最后一张观测图的时间戳 (T0)
+                # timestamps 列表包含 [过去10帧, 未来20帧]，共30个
+                # batch_x.shape[1] 为输入序列长度（通常为10），对应 timestamps 中的索引 0~9
+                # 因此最后一个观测时间戳索引为 batch_x.shape[1] - 1
+                obs_length = batch_x.shape[1]
+                if obs_length > len(timestamps):
+                     MLOGE(f"输入长度 ({obs_length}) 超过时间戳列表长度 ({len(timestamps)})")
+                     continue
+                     
+                last_obs_time_str = timestamps[obs_length - 1] 
                 last_obs_dt = datetime.strptime(last_obs_time_str, FMT)
                 
                 # 用于统计该样本的整体预测情况
@@ -238,7 +248,7 @@ def main():
                     # batch_x shape: [1, T, C, H, W] -> [T, H, W]
                     obs_frames = batch_x[0, :, 0, :, :].cpu().numpy() 
                     pred_frames = np.array(pred_frames_vis)
-                    print(f"obs_frames.shape = {obs_frames.shape}, pred_frames.shape = {pred_frames.shape}")
+                    # print(f"obs_frames.shape = {obs_frames.shape}, pred_frames.shape = {pred_frames.shape}")
                     
                     vis_path = os.path.join(args.vis_output, f"{sample_id}.png")
                     plot_inference(obs_frames, pred_frames, vis_path)
