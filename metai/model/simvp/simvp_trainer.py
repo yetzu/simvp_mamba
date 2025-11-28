@@ -93,75 +93,49 @@ class SimVP(l.LightningModule):
     
     def on_train_epoch_start(self):
         """
-        🚀 [SOTA] 课程学习机制 (Curriculum Learning) - Safe Mode 修正版
-        防止 Phase 2 结构崩塌
+        🚀 [Fast-Track] 激进型课程学习策略
+        目标：在较少 Epoch 内快速提升竞赛 Score
         """
         if not self.use_curriculum_learning:
             return
         
         epoch = self.current_epoch
-        max_epochs = getattr(self.hparams, 'max_epochs', 100)
+        max_epochs = getattr(self.hparams, 'max_epochs', 50) # 假设默认50轮
         
-        # 动态定义阶段边界
-        phase_1_end = int(0.2 * max_epochs) # Epoch 20
-        phase_2_end = int(0.6 * max_epochs) # Epoch 60 (延长 Phase 2)
+        # 归一化进度 (0.0 -> 1.0)
+        progress = epoch / max_epochs
         
-        weights = {}
-        phase_name = ""
+        # === 动态权重计算 ===
+        
+        # 1. L1 (基础约束): 快速下降
+        # 从 10.0 快速降到 1.0，后期不再过分关注像素级平滑
+        # 逻辑: 前期靠强 L1 快速成型，后期放手让 CSI 优化细节
+        l1_w = 10.0 - (9.0 * (progress ** 0.5)) 
+        l1_w = max(l1_w, 1.0) 
 
-        if epoch < phase_1_end:
-            # === Phase 1: 结构热身 (Structure) ===
-            # 高 L1，中 SSIM，其他关闭
-            weights = {'l1': 10.0, 'ssim': 1.0, 'evo': 0.0, 'spec': 0.0, 'csi': 0.0}
-            phase_name = "Phase 1: Structure (Convex)"
-            
-        elif epoch < phase_2_end:
-            # === Phase 2 (Safe Mode): 物理微调 ===
-            # 修正：大幅提高 L1 底线 (1.0 -> 5.0)，大幅降低 Evo/Spec 权重
-            progress = (epoch - phase_1_end) / (phase_2_end - phase_1_end)
-            
-            # L1: 10.0 -> 5.0 (保留强约束)
-            l1_w = 10.0 - progress * (10.0 - 5.0)
-            # SSIM: 1.0 -> 1.0 (保持)
-            ssim_w = 1.0
-            # Evo: 0.0 -> 0.1 (极低权重，防止噪点爆炸)
-            evo_w = progress * 0.1
-            # Spec: 0.0 -> 0.05 (极低权重)
-            spec_w = progress * 0.05
-            # CSI: 0.0 -> 0.5 (缓慢预热)
-            csi_w = progress * 0.5
-            
-            weights = {'l1': l1_w, 'ssim': ssim_w, 'evo': evo_w, 'spec': spec_w, 'csi': csi_w}
-            phase_name = f"Phase 2 (Safe): Physics Warmup [p={progress:.2f}]"
-            
-        else:
-            # === Phase 3: 指标冲刺 ===
-            progress = (epoch - phase_2_end) / (max_epochs - phase_2_end)
-            
-            # L1: 5.0 -> 1.0 (最终也不低于 1.0)
-            l1_w = 5.0 - progress * (5.0 - 1.0)
-            # SSIM: 1.0 -> 0.5
-            ssim_w = 1.0 - progress * 0.5
-            # Evo: 0.1 -> 0.5 (缓慢增加)
-            evo_w = 0.1 + progress * 0.4
-            # Spec: 0.05 -> 0.2
-            spec_w = 0.05 + progress * 0.15
-            
-            # CSI: 0.5 -> 5.0 (主要提分项)
-            csi_w = 0.5 + (5.0 - 0.5) * (progress ** 2)
-            
-            weights = {'l1': l1_w, 'ssim': ssim_w, 'evo': evo_w, 'spec': spec_w, 'csi': csi_w}
-            phase_name = f"Phase 3: Metric Sprint [p={progress:.2f}]"
+        # 2. SSIM (结构): 保持稳定
+        ssim_w = 1.0 - 0.5 * progress
 
+        # 3. CSI (核心提分项): 激进增长
+        # 从 0.5 开始 (不再是0!)，指数增长到 5.0
+        # 逻辑: 一开始就要关注阈值命中率
+        csi_w = 0.5 + 4.5 * (progress ** 2)
+
+        # 4. Spec & Evo (辅助): 缓慢增加
+        spec_w = 0.1 * progress
+        evo_w = 0.5 * progress
+
+        weights = {'l1': l1_w, 'ssim': ssim_w, 'evo': evo_w, 'spec': spec_w, 'csi': csi_w}
+        
         # 更新权重
         if hasattr(self, 'criterion') and hasattr(self.criterion, 'weights'):
             self.criterion.weights.update(weights)
         
-        # 记录日志
+        # 日志记录
         if self.trainer.is_global_zero:
             w_str = ", ".join([f"{k}={v:.4f}" for k, v in weights.items()])
-            print(f"\n[Curriculum] Epoch {epoch}/{max_epochs} | {phase_name}")
-            print(f"             Weights: {w_str}")
+            print(f"\n[Fast-Curriculum] Epoch {epoch}/{max_epochs} | Progress: {progress:.2f}")
+            print(f"                  Weights: {w_str}")
         
         # TensorBoard
         for k, v in weights.items():
@@ -280,6 +254,7 @@ with open(r'{log_file}', 'w') as f:
         metadata, x, y, target_mask, input_mask = batch
         target_mask = target_mask.bool()
 
+        # 1. 前向传播与插值
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         y = self._interpolate_batch_gpu(y, mode='max_pool')
         target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
@@ -288,33 +263,77 @@ with open(r'{log_file}', 'w') as f:
         y_pred = torch.sigmoid(logits_pred)
         y_pred_clamped = torch.clamp(y_pred, 0.0, 1.0)
         
+        # 2. 计算 Loss (保持不变)
         loss, loss_dict = self.criterion(logits_pred, y, mask=target_mask)
-        
         for comp in ['l1', 'ssim', 'csi', 'spec', 'evo']:
             if comp in loss_dict:
                 self.log(f'val_loss_{comp}', loss_dict[comp], on_epoch=True, sync_dist=True)
-        
-        mae = F.l1_loss(y_pred_clamped, y)
+        self.log('val_loss', loss, on_epoch=True, prog_bar=True, sync_dist=True)
 
+        # ====================================================
+        # 3. [优化] 对齐官方规则的评分计算
+        # ====================================================
         MM_MAX = 30.0
         pred_mm = y_pred_clamped * MM_MAX
         target_mm = y * MM_MAX
-        thresholds = [0.01, 0.1, 1.0, 2.0, 5.0, 8.0] 
-        weights = [0.1, 0.1, 0.1, 0.2, 0.2, 0.3]
-        ts_sum = 0.0
-        
-        for t, w in zip(thresholds, weights):
-            hits = ((pred_mm >= t) & (target_mm >= t)).float().sum()
-            misses = ((pred_mm < t) & (target_mm >= t)).float().sum()
-            false_alarms = ((pred_mm >= t) & (target_mm < t)).float().sum()
-            ts = hits / (hits + misses + false_alarms + 1e-6)
-            ts_sum += ts * w
-            
-        val_score = ts_sum / sum(weights)
 
-        self.log('val_loss', loss, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log('val_mae', mae, on_epoch=True, sync_dist=True)
+        # A. 官方阈值与强度权重 (Table 2)
+        # 去掉了 0.01 (噪音)，对齐官方 0.1 起步
+        thresholds = [0.1, 1.0, 2.0, 5.0, 8.0]
+        level_weights = [0.1, 0.1, 0.2, 0.25, 0.35]
+        
+        # B. 官方时效权重 (Table 1) - 针对 20 帧
+        # 对应 6min 到 120min
+        time_weights_list = [
+            0.0075, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1,  # 1-10 (60min 权重最高)
+            0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.0075, 0.005 # 11-20
+        ]
+        # 转换为 Tensor 并移动到对应设备
+        T_out = pred_mm.shape[1]
+        if T_out == 20:
+            time_weights = torch.tensor(time_weights_list, device=self.device)
+        else:
+            # 如果输出不是20帧，则平均分配
+            time_weights = torch.ones(T_out, device=self.device) / T_out
+
+        # C. 计算加权 TS (Weighted TS)
+        # 这种计算方式是 "Micro-average over Batch, but Macro over Time/Level"
+        # 既保留了批量计算的速度，又引入了时效权重
+        
+        total_score = 0.0
+        total_level_weight = sum(level_weights)
+
+        for t_val, w_level in zip(thresholds, level_weights):
+            # [B, T, H, W] -> Bool
+            hits_tensor = (pred_mm >= t_val) & (target_mm >= t_val)
+            misses_tensor = (pred_mm < t_val) & (target_mm >= t_val)
+            false_alarms_tensor = (pred_mm >= t_val) & (target_mm < t_val)
+            
+            # 在 [B, H, W] 维度求和，保留 [T] 维度以应用时效权重
+            # sum dim: 0(Batch), 2(H), 3(W) -> Result shape: [T]
+            hits = hits_tensor.float().sum(dim=(0, 2, 3))
+            misses = misses_tensor.float().sum(dim=(0, 2, 3))
+            false_alarms = false_alarms_tensor.float().sum(dim=(0, 2, 3))
+            
+            # 计算每帧的 TS: [T]
+            ts_t = hits / (hits + misses + false_alarms + 1e-6)
+            
+            # 应用时效权重: sum( [T] * [T] ) -> Scalar
+            # 注意：官方公式是 Sum(W_k * Score_k)，这里简化为 Sum(W_k * TS_k)
+            ts_weighted_time = (ts_t * time_weights).sum()
+            
+            # 累加强度分级得分
+            total_score += ts_weighted_time * w_level
+
+        # 归一化 (虽然 level_weights 和为 1，但保持严谨)
+        val_score = total_score / total_level_weight
+
+        # 4. 记录指标
         self.log('val_score', val_score, on_epoch=True, prog_bar=True, sync_dist=True)
+        
+        # 额外记录 MAE 供参考 (不参与 EarlyStopping，因为 MAE 容易被 0 值主导)
+        val_mae = F.l1_loss(y_pred_clamped, y)
+        self.log('val_mae', val_mae, on_epoch=True, sync_dist=True)
 
     def test_step(self, batch, batch_idx):
         metadata, x, y, target_mask, input_mask = batch

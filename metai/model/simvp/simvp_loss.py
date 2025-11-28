@@ -48,8 +48,8 @@ class WeightedScoreSoftCSILoss(nn.Module):
         mask: [B, T, H, W] 或 [B, 1, H, W]
         """
         T = pred.shape[1]
+        # 截取当前需要的时效权重，并归一化
         current_time_weights = self.time_weights[:, :T, :, :]
-        # 归一化时间权重
         current_time_weights = current_time_weights / current_time_weights.mean()
         
         # 统一 Mask 维度 (如果 mask 存在)
@@ -231,9 +231,10 @@ class HybridLoss(nn.Module):
         # 5.0 / 30.0 = 0.1667
         pixel_weight[target > (5.0 / 30.0)] = 5.0
         
-        # Level 3: > 8.0mm (权重 0.25 -> 0.35, 最高分) -> 设为 x20 关注度 (决胜点)
+        # Level 3: > 8.0mm (权重 0.25 -> 0.35, 最高分) -> 设为 x50 关注度 (决胜点)
         # 8.0 / 30.0 = 0.2667
-        pixel_weight[target > (8.0 / 30.0)] = 20.0
+        # [优化] 将权重从 20.0 提升至 50.0，强迫模型必须预测出强回波中心
+        pixel_weight[target > (8.0 / 30.0)] = 50.0
         
         # 应用动态权重
         l1_loss_map = l1_loss_map * pixel_weight

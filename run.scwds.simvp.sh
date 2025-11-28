@@ -34,21 +34,21 @@ case $MODE in
         echo "--------------------------------------------------------"
         
         python run/train_scwds_simvp.py \
-            --ckpt_path ./output/simvp/last.ckpt \
+            # --ckpt_path ./output/simvp/last.ckpt \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
             --batch_size 4 \
-            --accumulate_grad_batches 2 \
+            --accumulate_grad_batches 8 \
             --num_workers 8 \
             \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --max_epochs 20 \
+            --max_epochs 40 \
             --opt adamw \
-            --lr 1e-4 \
+            --lr 8e-4 \
             --sched cosine \
             --min_lr 1e-5 \
-            --warmup_epoch 5 \
+            --warmup_epoch 2 \
             \
             --model_type mamba \
             --hid_S 128 \
@@ -60,6 +60,8 @@ case $MODE in
             --drop_path 0.1 \
             --spatio_kernel_enc 5 \
             --spatio_kernel_dec 5 \
+            --loss_weight_l1 10.0 \
+            --loss_weight_csi 0.5 \
             \
             --use_curriculum_learning true \
             --early_stop_patience 20 \
