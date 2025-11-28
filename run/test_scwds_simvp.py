@@ -138,10 +138,10 @@ class MetricConfig:
     THRESHOLD_NOISE = 0.05 
     
     # 阈值边缘 (mm)
-    LEVEL_EDGES = np.array([0.0, 0.1, 1.0, 2.0, 5.0, 8.0, np.inf], dtype=np.float32)
+    LEVEL_EDGES = np.array([0.1, 1.0, 2.0, 5.0, 8.0, np.inf], dtype=np.float32)
     
     # 降水等级权重
-    _raw_level_weights = np.array([0.1, 0.1, 0.1, 0.2, 0.2, 0.3], dtype=np.float32)
+    _raw_level_weights = np.array([0.1, 0.1, 0.2, 0.25,  0.35], dtype=np.float32)
     LEVEL_WEIGHTS = _raw_level_weights / _raw_level_weights.sum()
 
     # 时效权重 (0-19 帧，对应 2 小时)
@@ -230,7 +230,8 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
             fn = np.logical_and(tru_bin, ~prd_bin).sum()
             fp = np.logical_and(~tru_bin, prd_bin).sum()
             denom_ts = tp + fn + fp
-            ts_val = (tp / denom_ts) if denom_ts > 0 else 1.0
+            # ts_val = (tp / denom_ts) if denom_ts > 0 else 1.0
+            ts_val = (tp / denom_ts) if denom_ts > 0 else 1e-6
             
             mask_eval = tru_bin | prd_bin
             mae_val = np.mean(abs_err[mask_eval]) if mask_eval.sum() > 0 else 0.0

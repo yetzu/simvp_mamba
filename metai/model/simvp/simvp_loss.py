@@ -22,7 +22,8 @@ class WeightedScoreSoftCSILoss(nn.Module):
         
         # --- 1. 对齐强度分级及权重 ---
         thresholds_raw = [0.1, 1.0, 2.0, 5.0, 8.0]
-        weights_raw    = [0.1, 0.1, 0.2, 0.2, 0.3] 
+        # weights_raw    = [0.1, 0.1, 0.2, 0.2, 0.3] 
+        weights_raw    = [0.1, 0.1, 0.2, 0.25, 0.35]
         self.register_buffer('thresholds', torch.tensor(thresholds_raw) / self.MM_MAX)
         self.register_buffer('intensity_weights', torch.tensor(weights_raw))
         
