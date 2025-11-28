@@ -64,7 +64,9 @@ case $MODE in
             --loss_weight_csi 0.5 \
             \
             --use_curriculum_learning true \
-            --early_stop_patience 20 \
+            --early_stop_patience 15 \
+            --early_stop_monitor val_score \
+            --early_stop_mode max \
             --accelerator cuda \
             --devices 1,2,3\
             --precision bf16-mixed \
