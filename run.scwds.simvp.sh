@@ -34,6 +34,7 @@ case $MODE in
         echo "--------------------------------------------------------"
         
         python run/train_scwds_simvp.py \
+            --ckpt_path ./output/simvp/last.ckpt \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
             --batch_size 4 \
@@ -42,7 +43,7 @@ case $MODE in
             \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --max_epochs 100 \
+            --max_epochs 20 \
             --opt adamw \
             --lr 1e-4 \
             --sched cosine \
@@ -61,7 +62,7 @@ case $MODE in
             --spatio_kernel_dec 5 \
             \
             --use_curriculum_learning true \
-            --early_stop_patience 50 \
+            --early_stop_patience 20 \
             --accelerator cuda \
             --devices 1,2,3\
             --precision bf16-mixed \
