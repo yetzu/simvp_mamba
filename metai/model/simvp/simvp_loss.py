@@ -4,15 +4,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
-
-# 尝试导入 torchmetrics，如果不存在则提供回退方案
-# 注：Lightning 通常会自动安装 torchmetrics
-try:
-    from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
-    TORCHMETRICS_AVAILABLE = True
-except ImportError:
-    TORCHMETRICS_AVAILABLE = False
-    print("Warning: torchmetrics not found. MS-SSIM loss will be skipped.")
+import numpy as np
+from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
 
 
 class WeightedScoreSoftCSILoss(nn.Module):
@@ -304,3 +297,4 @@ class HybridLoss(nn.Module):
         loss_dict['total'] = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
         
         return total_loss, loss_dict
+    
