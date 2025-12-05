@@ -5,7 +5,7 @@ import glob
 import torch
 import matplotlib
 import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
+import matplotlib.colors as mcolors
 import argparse
 import numpy as np
 from datetime import datetime
@@ -76,16 +76,13 @@ def find_best_ckpt(save_dir: str) -> str:
     if os.path.exists(last): return last
     
     # 最后查找所有 checkpoint 文件，返回最新的
-    # 排除 'last.ckpt' 以免干扰排序 (如果 glob 包含它)
     cpts = glob.glob(os.path.join(save_dir, '*.ckpt'))
     cpts = [c for c in cpts if 'last.ckpt' not in c and 'best.ckpt' not in c]
     
     if len(cpts) > 0:
-        # 按修改时间或文件名排序，这里按文件名排序通常能取到 epoch 最大的
         cpts = sorted(cpts)
         return cpts[-1]
         
-    # 如果只有 best/last 但前面没捕获到（理论上不可能），再兜底
     all_cpts = sorted(glob.glob(os.path.join(save_dir, '*.ckpt')))
     if len(all_cpts) == 0:
         raise FileNotFoundError(f'No checkpoint found in {save_dir}')
@@ -129,22 +126,12 @@ def print_checkpoint_info(ckpt_info: dict):
 # Part 1: 全局评分配置 (Metric Configuration)
 # ==========================================
 class MetricConfig:
-    # [关键确认] MM_MAX = 30.0
-    # 物理含义：数据中的最大整数值 300 对应 30.0 mm 降水
-    # 模型输出 [0, 1] -> 映射到 [0, 30.0] mm
     MM_MAX = 30.0
-    
-    # 噪音阈值 (mm)
     THRESHOLD_NOISE = 0.05 
-    
-    # 阈值边缘 (mm)
     LEVEL_EDGES = np.array([0.1, 1.0, 2.0, 5.0, 8.0, np.inf], dtype=np.float32)
-    
-    # 降水等级权重
     _raw_level_weights = np.array([0.1, 0.1, 0.2, 0.25,  0.35], dtype=np.float32)
     LEVEL_WEIGHTS = _raw_level_weights / _raw_level_weights.sum()
 
-    # 时效权重 (0-19 帧，对应 2 小时)
     TIME_WEIGHTS_DICT = {
         0: 0.0075, 1: 0.02, 2: 0.03, 3: 0.04, 4: 0.05,
         5: 0.06, 6: 0.07, 7: 0.08, 8: 0.09, 9: 0.1,
@@ -154,11 +141,9 @@ class MetricConfig:
 
     @staticmethod
     def get_time_weights(T):
-        """根据序列长度T获取时效权重"""
         if T == 20:
             return np.array([MetricConfig.TIME_WEIGHTS_DICT[t] for t in range(T)], dtype=np.float32)
         else:
-            # 如果 T 不是 20，使用均匀权重兜底
             print(f"[WARN] T={T}, expected 20. Using uniform time weights.")
             return np.ones(T, dtype=np.float32) / T
 
@@ -166,22 +151,14 @@ class MetricConfig:
 # Part 2: 核心统计计算 (Core Metrics)
 # ==========================================
 def calc_seq_metrics(true_seq, pred_seq, verbose=True):
-    """
-    计算序列的降水评分指标
-    true_seq: (T, H, W) 归一化值 [0, 1]
-    pred_seq: (T, H, W) 归一化值 [0, 1]
-    """
     T, H, W = true_seq.shape
     
-    # 1. 预处理：噪音过滤
-    # 转换阈值到归一化空间： 0.05 / 30.0
     pred_clean = pred_seq.copy()
     pred_clean[pred_clean < (MetricConfig.THRESHOLD_NOISE / MetricConfig.MM_MAX)] = 0.0
     
     time_weights = MetricConfig.get_time_weights(T)
     score_k_list = []
     
-    # 反归一化到 mm 并截断负值
     tru_mm_seq = np.clip(true_seq, 0.0, None) * MetricConfig.MM_MAX
     prd_mm_seq = np.clip(pred_clean, 0.0, None) * MetricConfig.MM_MAX
     
@@ -201,7 +178,6 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
         prd_frame = prd_mm_seq[t].reshape(-1)
         abs_err = np.abs(prd_frame - tru_frame)
 
-        # --- A. 计算相关系数 R_k ---
         mask_valid_corr = (tru_frame > 0) | (prd_frame > 0)
         if mask_valid_corr.sum() > 1:
             t_valid = tru_frame[mask_valid_corr]
@@ -216,7 +192,6 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
         corr_sum += R_k
         term_corr = np.sqrt(np.exp(R_k - 1.0))
 
-        # --- B. 逐等级计算 TS 和 MAE ---
         weighted_sum_metrics = 0.0
         for i in range(len(MetricConfig.LEVEL_WEIGHTS)):
             low = MetricConfig.LEVEL_EDGES[i]
@@ -230,7 +205,6 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
             fn = np.logical_and(tru_bin, ~prd_bin).sum()
             fp = np.logical_and(~tru_bin, prd_bin).sum()
             denom_ts = tp + fn + fp
-            # ts_val = (tp / denom_ts) if denom_ts > 0 else 1.0
             ts_val = (tp / denom_ts) if denom_ts > 0 else 1e-6
             
             mask_eval = tru_bin | prd_bin
@@ -242,7 +216,6 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
             term_mae = np.sqrt(np.exp(-mae_val / 100.0))
             weighted_sum_metrics += w_i * ts_val * term_mae
 
-        # --- C. 计算 Score_k ---
         Score_k = term_corr * weighted_sum_metrics
         score_k_list.append(Score_k)
 
@@ -272,46 +245,122 @@ def calc_seq_metrics(true_seq, pred_seq, verbose=True):
 # ==========================================
 # Part 3: 绘图功能 (Visualization)
 # ==========================================
+
+def create_precipitation_cmap():
+    """
+    创建自定义降水色标
+    区间: 0.01 <= r < 0.1, 0.1 <= r < 1, ..., r >= 8
+    0 值 (及 < 0.01) 显示为白色
+    """
+    hex_colors = [
+        '#9CF48D',  # 0.01 <= r < 0.1 (浅绿)
+        '#3CB73A',  # 0.1 <= r < 1 (中绿)
+        '#63B7FF',  # 1 <= r < 2 (浅蓝)
+        '#0200F9',  # 2 <= r < 5 (深蓝)
+        '#EE00F0',  # 5 <= r < 8 (紫红)
+        '#9F0000'   # r >= 8 (深红)
+    ]
+    
+    cmap = mcolors.ListedColormap(hex_colors)
+    cmap.set_bad('white')
+    cmap.set_under('white')
+    
+    # 边界设置：起始值设为0.01，确保0值落入under区域（白色）
+    bounds = [0.01, 0.1, 1, 2, 5, 8, 100]
+    norm = mcolors.BoundaryNorm(boundaries=bounds, ncolors=len(hex_colors))
+    
+    return cmap, norm
+
 def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1.0):
     """
     绘制 Obs, GT, Pred, Diff 对比图
-    obs_seq: (T_in, H, W)
-    true_seq: (T_out, H, W)
-    pred_seq: (T_out, H, W)
+    修复：确保所有列都显示边框（移除 axis('off')，改为隐藏刻度）
+    修改：Input 标签从 In-0~9 改为 T-9~0
     """
     T = true_seq.shape[0] # T_out = 20
     rows, cols = 4, T
     
-    fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.5), constrained_layout=True)
+    precip_cmap, precip_norm = create_precipitation_cmap()
+    
+    obs_mm = obs_seq * MetricConfig.MM_MAX
+    true_mm = true_seq * MetricConfig.MM_MAX
+    pred_mm = pred_seq * MetricConfig.MM_MAX
+    
+    # 增加高度以容纳底部 Legend
+    fig, axes = plt.subplots(rows, cols, figsize=(cols * 1.5, rows * 1.5 + 1.0))
     if T == 1: axes = axes[:, np.newaxis]
+    
+    fig.subplots_adjust(bottom=0.12, top=0.95, left=0.02, right=0.98, wspace=0.1, hspace=0.3)
+
+    # 辅助函数：统一设置边框样式
+    def setup_ax_border(ax, show_ylabel=False, ylabel_text=""):
+        # 关键修改：不要使用 ax.axis('off')，否则边框会被隐藏
+        # 而是隐藏刻度
+        ax.set_xticks([])
+        ax.set_yticks([])
+        
+        # 显式开启边框
+        for spine in ax.spines.values():
+            spine.set_visible(True)
+            spine.set_edgecolor('black')
+            spine.set_linewidth(0.5)
+            
+        if show_ylabel:
+            ax.set_ylabel(ylabel_text, fontsize=8)
+            # 确保 Y 轴 Label 显示
+            ax.yaxis.label.set_visible(True)
+
+    input_len = obs_mm.shape[0]
 
     for t in range(T):
-        # 1. Obs (Input) - 注意处理 T_in < T_out 的情况
-        if t < obs_seq.shape[0]:
-            axes[0, t].imshow(obs_seq[t], cmap='turbo', vmin=0.0, vmax=vmax)
-            axes[0, t].set_title(f'In-{t}', fontsize=6)
+        # 1. Obs (Input)
+        ax = axes[0, t]
+        if t < input_len:
+            ax.imshow(obs_mm[t], cmap=precip_cmap, norm=precip_norm)
+            # [修改] 标签逻辑：倒序显示 T-x
+            # 例如 input_len=10: t=0 -> T-9, t=9 -> T-0
+            time_idx = input_len - 1 - t
+            ax.set_title(f'T-{time_idx}', fontsize=6)
         else:
-            # 超过输入长度的部分显示为空白或灰色
-            axes[0, t].imshow(np.zeros_like(true_seq[0]), cmap='gray', vmin=0.0, vmax=1.0)
-        axes[0, t].axis('off')
-        if t == 0: axes[0, t].set_ylabel('Obs', fontsize=8)
+            ax.imshow(np.zeros_like(true_mm[0]), cmap=precip_cmap, norm=precip_norm)
+        
+        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Obs')
 
         # 2. GT (Target)
-        axes[1, t].imshow(true_seq[t], cmap='turbo', vmin=0.0, vmax=vmax)
-        axes[1, t].axis('off')
-        if t == 0: axes[1, t].set_ylabel('GT', fontsize=8)
-        axes[1, t].set_title(f'T+{t+1}', fontsize=6)
+        ax = axes[1, t]
+        ax.imshow(true_mm[t], cmap=precip_cmap, norm=precip_norm)
+        ax.set_title(f'T+{t+1}', fontsize=6)
+        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='GT')
 
         # 3. Pred
-        axes[2, t].imshow(pred_seq[t], cmap='turbo', vmin=0.0, vmax=vmax)
-        axes[2, t].axis('off')
-        if t == 0: axes[2, t].set_ylabel('Pred', fontsize=8)
+        ax = axes[2, t]
+        ax.imshow(pred_mm[t], cmap=precip_cmap, norm=precip_norm)
+        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Pred')
         
         # 4. Diff (GT - Pred)
-        diff = true_seq[t] - pred_seq[t]
-        axes[3, t].imshow(diff, cmap='bwr', vmin=-0.5, vmax=0.5)
-        axes[3, t].axis('off')
-        if t == 0: axes[3, t].set_ylabel('Diff', fontsize=8)
+        ax = axes[3, t]
+        diff = true_mm[t] - pred_mm[t]
+        ax.imshow(diff, cmap='bwr', vmin=-30, vmax=30)
+        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Diff')
+
+    # --- Legend 1: Precipitation (左侧) ---
+    cbar_ax_precip = fig.add_axes([0.20, 0.05, 0.25, 0.015])
+    sm_precip = plt.cm.ScalarMappable(cmap=precip_cmap, norm=precip_norm)
+    sm_precip.set_array([])
+    cbar_p = fig.colorbar(sm_precip, cax=cbar_ax_precip, orientation='horizontal', spacing='uniform')
+    cbar_p.set_ticks([0.1, 1, 2, 5, 8])
+    cbar_p.set_ticklabels(['0.1', '1', '2', '5', '8'])
+    cbar_p.set_label('Precipitation (mm)', fontsize=8)
+    cbar_p.ax.tick_params(labelsize=7)
+    
+    # --- Legend 2: Diff (右侧) ---
+    cbar_ax_diff = fig.add_axes([0.55, 0.05, 0.25, 0.015])
+    sm_diff = plt.cm.ScalarMappable(cmap='bwr', norm=plt.Normalize(vmin=-30, vmax=30))
+    sm_diff.set_array([])
+    cbar_d = fig.colorbar(sm_diff, cax=cbar_ax_diff, orientation='horizontal')
+    cbar_d.set_ticks([-30, -15, 0, 15, 30])
+    cbar_d.set_label('Difference (mm)', fontsize=8)
+    cbar_d.ax.tick_params(labelsize=7)
 
     print(f'[INFO] Saving Plot to {out_path}')
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
@@ -348,15 +397,10 @@ def render(obs_seq, true_seq, pred_seq, out_path: str, vmax: float = 1.0):
 def parse_args():
     parser = argparse.ArgumentParser(description='Test SCWDS SimVP Model')
     parser.add_argument('--data_path', type=str, default='data/samples.jsonl')
-    
-    # [关键修改] 更新默认输入形状: 10帧, 54通道 (30基础+24未来NWP)
     parser.add_argument('--in_shape', type=int, nargs=4, default=[10, 54, 256, 256],
                         help='Input shape (T, C, H, W). Default: [10, 54, 256, 256]')
-    
-    # [关键新增] 增加 aft_seq_length，默认20
     parser.add_argument('--aft_seq_length', type=int, default=20,
                         help='Output sequence length. Default: 20')
-                        
     parser.add_argument('--save_dir', type=str, default='./output/simvp')
     parser.add_argument('--num_samples', type=int, default=10)
     parser.add_argument('--accelerator', type=str, default='cuda')
@@ -367,8 +411,6 @@ def main():
     device = torch.device(args.accelerator if torch.cuda.is_available() else 'cpu')
     
     # 1. Config & Model
-    # 初始化 Config 对象，主要用于获取 resize_shape
-    # 注意: aft_seq_length 会通过 hparams 从 checkpoint 加载，这里 Config 仅作辅助
     config = SimVPConfig(
         data_path=args.data_path,
         in_shape=tuple(args.in_shape),
@@ -377,7 +419,6 @@ def main():
     )
     resize_shape = (config.in_shape[2], config.in_shape[3])
     
-    # 查找并加载 checkpoint
     ckpt_path = find_best_ckpt(config.save_dir)
     ckpt_info = get_checkpoint_info(ckpt_path)
     epoch = ckpt_info.get('epoch', None)
@@ -385,11 +426,9 @@ def main():
     if epoch is None:
         epoch = 0
     
-    # 创建输出目录
     out_dir = os.path.join(config.save_dir, f'vis_{epoch:02d}')
     os.makedirs(out_dir, exist_ok=True)
     
-    # 设置日志
     log_file_path = os.path.join(out_dir, 'log.txt')
     set_logger(log_file_path)
     
@@ -400,19 +439,16 @@ def main():
     print(f"[INFO] Metric MM_MAX: {MetricConfig.MM_MAX}")
     print(f"[INFO] 可视化结果将保存到: {out_dir}")
     
-    # 加载模型
     model = SimVP.load_from_checkpoint(ckpt_path)
     model.eval().to(device)
     
     # 2. Data
-    # 使用 ScwdsDataModule，它会自动调用更新后的 MetSample
     data_module = ScwdsDataModule(
         data_path=config.data_path,
         resize_shape=resize_shape,
         batch_size=1,
         num_workers=4
     )
-    # setup('test') 会准备 test_dataloader
     data_module.setup('test')
     test_loader = data_module.test_dataloader()
     
@@ -422,20 +458,12 @@ def main():
         for bidx, batch in enumerate(test_loader):
             metadata_batch, batch_x, batch_y, target_mask, input_mask = batch
             
-            # Inference
-            # batch_x: [1, 10, 54, 256, 256]
-            # batch_y: [1, 20, 1, 256, 256]
             outputs = model.test_step(
                 (metadata_batch, batch_x.to(device), batch_y.to(device), target_mask.to(device), input_mask.to(device)), 
                 bidx
             )
             
-            # Render
             save_path = os.path.join(out_dir, f'sample_{bidx:03d}.png')
-            
-            # outputs['inputs']: [10, 54, H, W] -> render 取 ch=0 -> Past Radar
-            # outputs['trues']: [20, 1, H, W]
-            # outputs['preds']: [20, 1, H, W]
             s = render(outputs['inputs'], outputs['trues'], outputs['preds'], save_path)
             scores.append(s)
             

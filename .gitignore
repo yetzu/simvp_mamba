@@ -182,3 +182,7 @@ tmp/
 output/
 lightning_logs/
 bak/
+submit/
+test_logs/
+
+*.zip

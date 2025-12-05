@@ -41,4 +41,4 @@ watch -n 1 nvidia-smi
 
 tensorboard --logdir ./output/meteo_mamba_a800 --port 6006
 
-nohup bash run.scwds.mamba.sh train > train_log.txt 2>&1 &
+nohup bash run.scwds.simvp.sh train > train_simvp_scwds.log 2>&1 &

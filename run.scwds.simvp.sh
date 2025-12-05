@@ -6,7 +6,7 @@
 
 # ================= 环境变量优化 =================
 export PYTHONPATH=$PYTHONPATH:$(pwd)
-export PYTORCH_ALLOC_CONF=expandable_segments:True
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 export NCCL_P2P_DISABLE=0
 export NCCL_IB_DISABLE=0
 export NCCL_DEBUG=WARN
@@ -18,10 +18,7 @@ if [ $# -eq 0 ]; then
     echo "支持的模式:"
     echo " train      - 训练 SimVP 基座模型"
     echo " test       - 测试 SimVP 基座模型"
-    echo " train_gan  - 基于 SimVP 训练 Refiner GAN (需先完成 train)"
-    echo " test_gan   - 测试 GAN 模型"
     echo " infer      - 使用 SimVP 基座进行推理"
-    echo " infer_gan  - 使用 GAN 模型进行推理"
     exit 1
 fi
 
@@ -37,10 +34,9 @@ case $MODE in
         echo "--------------------------------------------------------"
         
         python run/train_scwds_simvp.py \
-            --ckpt_path ./output/simvp/last.ckpt \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
-            --batch_size 1 \
+            --batch_size 4 \
             --accumulate_grad_batches 8 \
             --num_workers 8 \
             \
@@ -63,17 +59,18 @@ case $MODE in
             --drop_path 0.1 \
             --spatio_kernel_enc 5 \
             --spatio_kernel_dec 5 \
+            --loss_weight_l1 10.0 \
+            --loss_weight_csi 0.5 \
             \
             --use_curriculum_learning true \
             --early_stop_patience 15 \
             --early_stop_monitor val_score \
             --early_stop_mode max \
             --accelerator cuda \
-            --devices 0,1 \
+            --devices 1,2,3\
             --precision bf16-mixed \
             --gradient_clip_val 0.5 \
             --gradient_clip_algorithm norm
-            
         ;;
         
     # ============================================================
@@ -90,60 +87,9 @@ case $MODE in
             --aft_seq_length 20 \
             --save_dir ./output/simvp \
             --num_samples 10 \
-            --accelerator cuda
+            --accelerator cuda:0
         ;;
         
-    # ... (train_gan, test_gan, infer 模式保持不变)
-    "train_gan")
-        echo "----------------------------------------"
-        echo "🎨 开始 SimVP-GAN 二阶段微调..."
-        echo "----------------------------------------"
-        
-        BACKBONE_CKPT="./output/simvp/last.ckpt"
-        if [ ! -f "$BACKBONE_CKPT" ]; then
-            BACKBONE_CKPT=$(find ./output/simvp -name "epoch=*.ckpt" | sort -V | tail -n 1)
-        fi
-        
-        if [ ! -f "$BACKBONE_CKPT" ]; then
-            echo "❌ 错误: 未找到基座模型权重 (./output/simvp/last.ckpt 或其他)"
-            echo "请先运行 'bash run.scwds.simvp.sh train'"
-            exit 1
-        fi
-        
-        echo "Using Backbone: $BACKBONE_CKPT"
-
-        mkdir -p ./output/simvp_gan
-
-        python run/gan_train_scwds_simvp.py \
-            --data_path data/samples.jsonl \
-            --ckpt_path $BACKBONE_CKPT \
-            --batch_size 8 \
-            --num_workers 16 \
-            --max_epochs 50 \
-            --lr 1e-4 \
-            --lambda_content 100.0 \
-            --lambda_adv 0.01 \
-            --lambda_fm 10.0 \
-            --accelerator cuda \
-            --devices 0,1 \
-            --resume_ckpt ./output/simvp_gan/checkpoints/last.ckpt
-        ;;
-
-    "test_gan")
-        echo "----------------------------------------"
-        echo "🧪 开始测试 GAN 模型..."
-        echo "----------------------------------------"
-        
-        python run/gan_test_scwds_simvp.py \
-            --data_path data/samples.jsonl \
-            --save_dir ./output/simvp_gan \
-            --num_samples 10 \
-            --accelerator cuda \
-            --backbone_ckpt_path ./output/simvp/last.ckpt \
-            --gan_ckpt_path "./output/simvp_gan/checkpoints/last.ckpt" \
-            --tta 1 \
-            --device cuda
-        ;;
 
     "infer")
         echo "----------------------------------------"
@@ -152,31 +98,12 @@ case $MODE in
         
         python run/infer_scwds_simvp.py \
             --data_path data/samples.testset.jsonl \
-            --in_shape 20 28 256 256 \
+            --in_shape 20 54 256 256 \
             --save_dir ./output/simvp \
-            --accelerator cuda \
+            --accelerator cuda:0 \
             --vis
         ;;
         
-    "infer_gan")
-        echo "----------------------------------------"
-        echo "🎨 开始推理 GAN 模型..."
-        echo "----------------------------------------"
-        
-        python run/gan_infer_scwds_simvp.py \
-            --data_path data/samples.testset.jsonl \
-            --save_dir ./output/simvp_gan \
-            --backbone_ckpt_path ./output/simvp/last.ckpt \
-            --gan_ckpt_path "./output/simvp_gan/checkpoints/last.ckpt" \
-            --tta 8 \
-            --vis \
-            --accelerator cuda
-        ;;
-    *)
-        echo "错误: 不支持的操作模式 '$MODE'"
-        echo "支持的模式: train, test, train_gan, test_gan, infer, infer_gan"
-        exit 1
-        ;;
 esac
 
 echo "✅ 操作完成！"
