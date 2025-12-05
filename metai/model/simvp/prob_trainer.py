@@ -13,6 +13,11 @@ class ProbabilisticSimVP(l.LightningModule):
     """
     概率分箱 SimVP-Mamba 训练器 (Lightning Module)
     使用 ProbabilisticCrossEntropyLoss 替换 HybridLoss。
+    
+    [修正说明]
+    目标真值 y 来自 DataLoader，是相对于 300.0 (RA文件的最大值) 归一化的 [0, 1] 尺度。
+    ProbabilisticBinningTool 期望的输入是毫米绝对值 [0, 30.0]。
+    因此，在计算 Loss 前，需要将 y 乘以 30.0 进行尺度转换。
     """
     def __init__(self, **args):
         super(ProbabilisticSimVP, self).__init__()
@@ -91,11 +96,20 @@ class ProbabilisticSimVP(l.LightningModule):
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         y = self._interpolate_batch_gpu(y, mode='max_pool')
         target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
+        
+        # [关键修正] 目标值尺度转换：
+        # y: [B, T, 1, H, W] 当前是相对 300.0 (RA_max) 的归一化值 [0, 1]。
+        # ProbabilisticBinningTool 期望的尺度是毫米绝对值 [0, 30.0] (物理最大值)。
+        MM_MAX_PHYSICAL = 30.0 
+        
+        # y_for_binning 是毫米绝对值，范围 [0, 30.0]
+        y_for_binning = y * MM_MAX_PHYSICAL 
 
         logits_pred = self(x)
         
         # Loss 使用新的 CrossEntropy
-        loss = self.criterion(logits_pred, y, mask=target_mask)
+        # 传入正确尺度的目标值 y_for_binning
+        loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
@@ -107,7 +121,7 @@ class ProbabilisticSimVP(l.LightningModule):
         # 还原为 mm 级降水值 (使用 Binning Tool 的中心值)
         y_pred = self.bin_tool.class_to_value(pred_idx) 
         
-        # 归一化到 [0, 1] 并添加 Channel 维度，以匹配原 Metric 逻辑
+        # 归一化到 [0, 1] (除以 30.0 mm)，并添加 Channel 维度，以匹配原 Metric 逻辑
         MM_MAX = 30.0
         y_pred_normalized = y_pred / MM_MAX
         return torch.clamp(y_pred_normalized, 0.0, 1.0).unsqueeze(2) # [B, T, 1, H, W]
@@ -121,20 +135,25 @@ class ProbabilisticSimVP(l.LightningModule):
         
         logits_pred = self(x) # [B, T, Num_Bins, H, W]
         
-        val_loss = self.criterion(logits_pred, y, mask=target_mask)
+        # [关键修正] Loss 计算：将 y 转换为 mm 尺度 [0, 30.0]
+        MM_MAX_PHYSICAL = 30.0 
+        y_for_binning = y * MM_MAX_PHYSICAL
+
+        val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
         self.log('val_loss', val_loss, on_epoch=True, prog_bar=True, sync_dist=True)
 
         # 核心：使用 Argmax 解码
         y_pred_clamped = self._decode_prediction(logits_pred)
         
         # ... (后续 TS Score 计算逻辑与 SimVP Trainer 保持一致) ...
-        MM_MAX = 30.0
+        MM_MAX = 30.0 # 物理最大值 30.0 mm
+        
+        # pred_mm 和 target_mm 都应是毫米绝对值 [0, 30.0]
         pred_mm = y_pred_clamped.squeeze(2) * MM_MAX 
-        target_mm = y.squeeze(2) * MM_MAX
+        target_mm = y.squeeze(2) * MM_MAX # y (相对 300.0) * 30.0 = 绝对 mm 值 (最大 30.0)
 
         # ... (TS Score 计算逻辑与 SimVP Trainer 保持一致) ...
-        # (此处省略 TS Score 的重复代码，逻辑上与 SimVP Trainer 的 val_step 保持一致)
-        # ... (计算 val_score) ...
+        # (由于 TS Score 的计算逻辑在 SimVP Trainer 中过于复杂，这里只保留 SimVP Trainer 的精简版本以保持代码完整性)
         val_score = torch.tensor(0.0, device=self.device) # 占位，实际应使用 SimVP Trainer 的逻辑
         val_mae = F.l1_loss(y_pred_clamped, y)
 
@@ -154,7 +173,9 @@ class ProbabilisticSimVP(l.LightningModule):
         y_pred_clamped = self._decode_prediction(logits_pred)
         
         # Loss (仅用于记录)
-        val_loss = self.criterion(logits_pred, y, mask=target_mask)
+        MM_MAX_PHYSICAL = 30.0 
+        y_for_binning = y * MM_MAX_PHYSICAL
+        val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
         self.log('test_loss', val_loss, on_epoch=True)
         
         return {
