@@ -1,4 +1,4 @@
-# metai/model/simvp_trainer.py
+# metai/model/simvp/simvp_trainer.py
 
 import subprocess
 import os
@@ -94,13 +94,13 @@ class SimVP(l.LightningModule):
     def on_train_epoch_start(self):
         """
         🚀 [Fast-Track] 激进型课程学习策略
-        目标：在较少 Epoch 内快速提升竞赛 Score
+        目标：在较少 Epoch (如40轮) 内快速提升竞赛 Score
         """
         if not self.use_curriculum_learning:
             return
         
         epoch = self.current_epoch
-        max_epochs = getattr(self.hparams, 'max_epochs', 50) # 假设默认50轮
+        max_epochs = getattr(self.hparams, 'max_epochs', 50) 
         
         # 归一化进度 (0.0 -> 1.0)
         progress = epoch / max_epochs
@@ -108,12 +108,11 @@ class SimVP(l.LightningModule):
         # === 动态权重计算 ===
         
         # 1. L1 (基础约束): 快速下降
-        # 从 10.0 快速降到 1.0，后期不再过分关注像素级平滑
-        # 逻辑: 前期靠强 L1 快速成型，后期放手让 CSI 优化细节
+        # 从 10.0 快速降到 1.0，后期不再过分关注像素级平滑，避免产生模糊预测
         l1_w = 10.0 - (9.0 * (progress ** 0.5)) 
         l1_w = max(l1_w, 1.0) 
 
-        # 2. SSIM (结构): 保持稳定
+        # 2. SSIM (结构): 保持稳定，随时间微降
         ssim_w = 1.0 - 0.5 * progress
 
         # 3. CSI (核心提分项): 激进增长
@@ -122,6 +121,7 @@ class SimVP(l.LightningModule):
         csi_w = 0.5 + 4.5 * (progress ** 2)
 
         # 4. Spec & Evo (辅助): 缓慢增加
+        # 频域和演变损失用于辅助产生更真实的纹理和运动
         spec_w = 0.1 * progress
         evo_w = 0.5 * progress
 
@@ -274,32 +274,30 @@ with open(r'{log_file}', 'w') as f:
         # 3. [优化] 对齐官方规则的评分计算
         # ====================================================
         MM_MAX = 30.0
-        pred_mm = y_pred_clamped * MM_MAX
-        target_mm = y * MM_MAX
+        
+        # [关键修复] 移除 Channel 维度 (dim=2)，确保格式为 [B, T, H, W]
+        # 否则 .sum(dim=(0,2,3)) 会错误地保留宽度维度，导致与 time_weights 维度不匹配
+        pred_mm = y_pred_clamped.squeeze(2) * MM_MAX 
+        target_mm = y.squeeze(2) * MM_MAX
 
         # A. 官方阈值与强度权重 (Table 2)
-        # 去掉了 0.01 (噪音)，对齐官方 0.1 起步
         thresholds = [0.1, 1.0, 2.0, 5.0, 8.0]
         level_weights = [0.1, 0.1, 0.2, 0.25, 0.35]
         
         # B. 官方时效权重 (Table 1) - 针对 20 帧
         # 对应 6min 到 120min
         time_weights_list = [
-            0.0075, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1,  # 1-10 (60min 权重最高)
+            0.0075, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1,  # 1-10
             0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.0075, 0.005 # 11-20
         ]
-        # 转换为 Tensor 并移动到对应设备
+        
         T_out = pred_mm.shape[1]
         if T_out == 20:
             time_weights = torch.tensor(time_weights_list, device=self.device)
         else:
-            # 如果输出不是20帧，则平均分配
             time_weights = torch.ones(T_out, device=self.device) / T_out
 
         # C. 计算加权 TS (Weighted TS)
-        # 这种计算方式是 "Micro-average over Batch, but Macro over Time/Level"
-        # 既保留了批量计算的速度，又引入了时效权重
-        
         total_score = 0.0
         total_level_weight = sum(level_weights)
 
@@ -309,8 +307,8 @@ with open(r'{log_file}', 'w') as f:
             misses_tensor = (pred_mm < t_val) & (target_mm >= t_val)
             false_alarms_tensor = (pred_mm >= t_val) & (target_mm < t_val)
             
-            # 在 [B, H, W] 维度求和，保留 [T] 维度以应用时效权重
-            # sum dim: 0(Batch), 2(H), 3(W) -> Result shape: [T]
+            # 在 [B, H, W] 维度求和 (dim 0, 2, 3)，结果保留 [T]
+            # 这里 dim=2 是 H，dim=3 是 W，因为 Channel 已经被 squeeze 掉了
             hits = hits_tensor.float().sum(dim=(0, 2, 3))
             misses = misses_tensor.float().sum(dim=(0, 2, 3))
             false_alarms = false_alarms_tensor.float().sum(dim=(0, 2, 3))
@@ -318,20 +316,19 @@ with open(r'{log_file}', 'w') as f:
             # 计算每帧的 TS: [T]
             ts_t = hits / (hits + misses + false_alarms + 1e-6)
             
-            # 应用时效权重: sum( [T] * [T] ) -> Scalar
-            # 注意：官方公式是 Sum(W_k * Score_k)，这里简化为 Sum(W_k * TS_k)
+            # 应用时效权重: sum([T] * [T]) -> Scalar
             ts_weighted_time = (ts_t * time_weights).sum()
             
             # 累加强度分级得分
             total_score += ts_weighted_time * w_level
 
-        # 归一化 (虽然 level_weights 和为 1，但保持严谨)
+        # 归一化
         val_score = total_score / total_level_weight
 
         # 4. 记录指标
         self.log('val_score', val_score, on_epoch=True, prog_bar=True, sync_dist=True)
         
-        # 额外记录 MAE 供参考 (不参与 EarlyStopping，因为 MAE 容易被 0 值主导)
+        # 额外记录 MAE 供参考
         val_mae = F.l1_loss(y_pred_clamped, y)
         self.log('val_mae', val_mae, on_epoch=True, sync_dist=True)
 
