@@ -136,7 +136,7 @@ case $MODE in
             \
             --lr 2e-4 \
             --min_lr 1e-6 \
-            --warmup_epoch 5 \
+            --warmup_epoch 3 \
             \
             --early_stop_patience 10 \
             --accelerator cuda \
