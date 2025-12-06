@@ -1,4 +1,4 @@
-# test_scwds_prob.py (基于 run/test_scwds_simvp.py 修改，适配概率分箱模式)
+# run/test_scwds_prob.py (基于 run/test_scwds_simvp.py 修改，适配概率分箱模式 + 基座对比)
 
 import sys
 import os
@@ -19,7 +19,7 @@ from metai.dataset.met_dataloader_scwds import ScwdsDataModule
 from metai.model.simvp.simvp_config import SimVPConfig
 # [修改点 1] 导入 Probabilistic SimVP Trainer
 from metai.model.simvp.prob_trainer import ProbabilisticSimVP 
-from metai.model.simvp.simvp_trainer import SimVP as SimVP_Regression # 导入原 SimVP 以复用 MetricConfig
+from metai.model.simvp.simvp_trainer import SimVP as SimVP_Regression # 导入原 SimVP 以复用 MetricConfig 和加载基座
 
 # ==========================================
 # Part 0: 辅助工具函数
@@ -266,14 +266,14 @@ def create_precipitation_cmap():
     
     return cmap, norm
 
-def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1.0):
+def plot_seq_visualization(obs_seq, true_seq, pred_seq, base_seq, scores, out_path, vmax=1.0):
     """
-    绘制 Obs, GT, Pred, Diff 对比图
-    修复：确保所有列都显示边框（移除 axis('off')，改为隐藏刻度）
-    修改：Input 标签从 In-0~9 改为 T-9~0
+    绘制 Obs, GT, Base Pred, Prob Pred, Diff 对比图
+    [修改] 增加 base_seq 参数，如果非 None，则绘制 5 行，否则绘制 4 行
     """
     T = true_seq.shape[0] # T_out = 20
-    rows, cols = 4, T
+    rows = 5 if base_seq is not None else 4
+    cols = T
     
     precip_cmap, precip_norm = create_precipitation_cmap()
     
@@ -313,7 +313,6 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
         if t < input_len:
             ax.imshow(obs_mm[t], cmap=precip_cmap, norm=precip_norm)
             # [修改] 标签逻辑：倒序显示 T-x
-            # 例如 input_len=10: t=0 -> T-9, t=9 -> T-0
             time_idx = input_len - 1 - t
             ax.set_title(f'T-{time_idx}', fontsize=6)
         else:
@@ -327,13 +326,23 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
         ax.set_title(f'T+{t+1}', fontsize=6)
         setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='GT')
 
-        # 3. Pred
-        ax = axes[2, t]
+        # 3. Base Pred (Optional)
+        current_row = 2
+        if base_seq is not None:
+            base_mm = base_seq * MetricConfig.MM_MAX
+            ax = axes[current_row, t]
+            ax.imshow(base_mm[t], cmap=precip_cmap, norm=precip_norm)
+            setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Base')
+            current_row += 1
+
+        # 4. Prob Pred
+        ax = axes[current_row, t]
         ax.imshow(pred_mm[t], cmap=precip_cmap, norm=precip_norm)
-        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Pred')
+        setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Prob')
+        current_row += 1
         
-        # 4. Diff (GT - Pred)
-        ax = axes[3, t]
+        # 5. Diff (GT - Prob Pred)
+        ax = axes[current_row, t]
         diff = true_mm[t] - pred_mm[t]
         ax.imshow(diff, cmap='bwr', vmin=-30, vmax=30)
         setup_ax_border(ax, show_ylabel=(t==0), ylabel_text='Diff')
@@ -365,7 +374,7 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
 # ==========================================
 # Part 4: 主入口函数 (Wrapper)
 # ==========================================
-def render(obs_seq, true_seq, pred_seq, out_path: str, vmax: float = 1.0):
+def render(obs_seq, true_seq, pred_seq, base_seq, out_path: str, vmax: float = 1.0):
     # 1. 数据格式统一 (转 Numpy & 提取通道)
     def to_numpy_ch(x, ch=0):
         if isinstance(x, torch.Tensor): x = x.detach().cpu().numpy()
@@ -377,15 +386,18 @@ def render(obs_seq, true_seq, pred_seq, out_path: str, vmax: float = 1.0):
     tru = to_numpy_ch(true_seq)
     prd = to_numpy_ch(pred_seq)
     
+    # 处理基座预测
+    base = to_numpy_ch(base_seq) if base_seq is not None else None
+    
     print(f"Processing: {os.path.basename(out_path)}")
     
-    # 2. 调用统计模块
+    # 2. 调用统计模块 (只计算 Prob 模型的指标)
     metrics_res = calc_seq_metrics(tru, prd, verbose=True)
     
     final_score = metrics_res['final_score']
     
-    # 3. 调用绘图模块
-    plot_seq_visualization(obs, tru, metrics_res['pred_clean'], metrics_res['score_per_frame'], out_path, vmax=vmax)
+    # 3. 调用绘图模块 (传入 base_seq)
+    plot_seq_visualization(obs, tru, metrics_res['pred_clean'], base, metrics_res['score_per_frame'], out_path, vmax=vmax)
     
     return final_score
 
@@ -402,6 +414,10 @@ def parse_args():
     
     # [新增] 分箱参数
     parser.add_argument('--num_bins', type=int, default=64, help='概率分箱的数量')
+    
+    # [新增] 基座模型路径参数
+    parser.add_argument('--base_ckpt_dir', type=str, default='./output/simvp', help='基座 SimVP 模型的 Checkpoint 目录')
+    
     return parser.parse_args()
 
 def main():
@@ -419,6 +435,7 @@ def main():
     )
     resize_shape = (config.in_shape[2], config.in_shape[3])
     
+    # 加载 Prob 模型 Checkpoint
     ckpt_path = find_best_ckpt(config.save_dir)
     ckpt_info = get_checkpoint_info(ckpt_path)
     
@@ -437,6 +454,18 @@ def main():
     model = ProbabilisticSimVP.load_from_checkpoint(ckpt_path, num_bins=config.num_bins)
     model.eval().to(device)
     
+    # [新增] 加载基座 SimVP 模型 (Regression)
+    base_model = None
+    if args.base_ckpt_dir:
+        try:
+            base_ckpt_path = find_best_ckpt(args.base_ckpt_dir)
+            print(f"[INFO] Loading Base Model from: {base_ckpt_path}")
+            base_model = SimVP_Regression.load_from_checkpoint(base_ckpt_path, map_location=device)
+            base_model.eval().to(device)
+        except Exception as e:
+            print(f"[WARNING] 无法加载基座模型，将跳过基座对比: {e}")
+            base_model = None
+
     # 2. Data
     data_module = ScwdsDataModule(
         data_path=config.data_path,
@@ -451,13 +480,41 @@ def main():
     
     with torch.no_grad():
         for bidx, batch in enumerate(test_loader):
+            # [关键修复] 将 Tensor 移动到正确的设备 (GPU)
+            metadata, x, y, target_mask, input_mask = batch
+            
+            x = x.to(device)
+            y = y.to(device)
+            target_mask = target_mask.to(device)
+            input_mask = input_mask.to(device)
+            
+            # 重新打包
+            batch_on_device = (metadata, x, y, target_mask, input_mask)
+            
+            # 1. 运行 Prob 模型推理
             # ProbabilisticSimVP.test_step 已执行 Argmax 解码和归一化
-            outputs = model.test_step(batch, bidx)
+            outputs = model.test_step(batch_on_device, bidx)
+            
+            # 2. [新增] 运行 Base 模型推理
+            base_preds = None
+            if base_model is not None:
+                # SimVP forward 返回 raw logits [B, T, C, H, W]
+                
+                # [🔥 关键修复] 显式调用 Resize，将 301x301 -> 256x256
+                # 否则模型内部 Skip Connection 会出现 304 vs 301 的尺寸不匹配
+                x_base = base_model._interpolate_batch_gpu(x, mode='max_pool')
+                
+                base_logits = base_model(x_base)
+                base_sigmoid = torch.sigmoid(base_logits)
+                base_clamped = torch.clamp(base_sigmoid, 0.0, 1.0)
+                # 提取 numpy 数据 [T, C, H, W]
+                base_preds = base_clamped[0].cpu().numpy()
             
             save_path = os.path.join(out_dir, f'sample_{bidx:03d}.png')
             
             # outputs['preds'] 是 Argmax 解码后的归一化数值 [T, 1, H, W]
-            s = render(outputs['inputs'], outputs['trues'], outputs['preds'], save_path)
+            # 传入 base_preds 进行对比渲染
+            s = render(outputs['inputs'], outputs['trues'], outputs['preds'], base_preds, save_path)
             scores.append(s)
             
             if bidx >= args.num_samples - 1:

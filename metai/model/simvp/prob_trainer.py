@@ -9,7 +9,6 @@ from lightning.pytorch.utilities.types import OptimizerLRScheduler
 from metai.model.core import get_optim_scheduler, timm_schedulers
 from metai.model.simvp.prob_loss import ProbabilisticCrossEntropyLoss, ProbabilisticBinningTool
 from .prob_model import ProbabilisticSimVP_Model
-# from metai.model.simvp.simvp_trainer import SimVP # 不再需要直接导入 SimVP 类方法
 
 class ProbabilisticSimVP(l.LightningModule):
     """
@@ -138,6 +137,7 @@ class ProbabilisticSimVP(l.LightningModule):
             self.bin_tool.to(logits.device)
             
         y_pred = self.bin_tool.class_to_value(pred_idx) 
+        y_pred[y_pred < 0.05] = 0.0
         
         MM_MAX = 30.0
         y_pred_normalized = y_pred / MM_MAX

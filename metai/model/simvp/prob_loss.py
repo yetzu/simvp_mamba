@@ -39,6 +39,7 @@ class ProbabilisticBinningTool:
         
         # 计算 Centers (用于 Argmax 解码)
         self.centers_np = (self.edges_np[:-1] + self.edges_np[1:]) / 2.0
+        self.centers_np[0] = 0.0
         
         # --- 2. 类别权重设计：匹配比赛规则，定向增强强降水 ---
         self.class_weights_np = self._calculate_weights()
