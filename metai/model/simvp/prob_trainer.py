@@ -1,260 +1,234 @@
-# metai/model/simvp/prob_trainer.py
+# run/train_scwds_prob.py (概率分箱 SimVP-Mamba 迁移学习训练脚本 - 改进版)
+
+import sys
+import os
+import glob
+from datetime import datetime
+import argparse
+import ast
+from pydantic import ValidationError
+
+# 添加项目根目录到Python路径
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
-import torch.nn.functional as F
 import lightning as l
-from typing import Any, Dict, cast
-from lightning.pytorch.utilities.types import OptimizerLRScheduler
+from lightning.pytorch.loggers import TensorBoardLogger
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
 
-from metai.model.core import get_optim_scheduler, timm_schedulers
-from metai.model.simvp.prob_loss import ProbabilisticCrossEntropyLoss, ProbabilisticBinningTool
-from .prob_model import ProbabilisticSimVP_Model
+from metai.dataset.met_dataloader_scwds import ScwdsDataModule
+from metai.model.simvp.simvp_config import SimVPConfig
+# 导入 Probabilistic Trainer 和 SimVP 基座模型
+from metai.model.simvp.prob_trainer import ProbabilisticSimVP 
+from metai.model.simvp.simvp_trainer import SimVP 
+from metai.utils import MLOGI
 
-class ProbabilisticSimVP(l.LightningModule):
-    """
-    概率分箱 SimVP-Mamba 训练器 (Lightning Module)
-    使用 ProbabilisticCrossEntropyLoss 替换 HybridLoss。
-    """
-    def __init__(self, **args):
-        super(ProbabilisticSimVP, self).__init__()
-        
-        self.save_hyperparameters()
-        config: Dict[str, Any] = dict(args)
-        
-        # 1. 模型初始化
-        self.num_bins = config.get('out_channels', config.get('num_bins', 64)) 
-        self.model = self._build_model(config)
-        
-        # 2. Loss 配置
-        self.criterion = ProbabilisticCrossEntropyLoss(
-            num_bins=self.num_bins,
-            max_val=30.0 
-        )
-        
-        # 3. 初始化 Binning Tool (用于解码)
-        self.bin_tool = ProbabilisticBinningTool(
-            num_bins=self.num_bins, max_val=30.0, device='cpu'
-        )
-        
-        # 4. 其他配置
-        rs = config.get('resize_shape', None)
-        self.resize_shape = tuple(rs) if rs is not None else None
-        
-        self.use_curriculum_learning = False
-        self.auto_test_after_epoch = config.get('auto_test_after_epoch', True)
-        
-        # 5. 确保 Bin Tool 最终在正确的设备
-        if hasattr(self.bin_tool, 'to') and self.bin_tool.device != self.device:
-             self.bin_tool.to(self.device)
-
-    def _build_model(self, config: Dict[str, Any]):
-        return ProbabilisticSimVP_Model(
-             in_shape=config.get('in_shape'), hid_S=config.get('hid_S', 128), 
-             hid_T=config.get('hid_T', 512), N_S=config.get('N_S', 4), N_T=config.get('N_T', 12),
-             model_type=config.get('model_type', 'mamba'), out_channels=self.num_bins,
-             mlp_ratio=config.get('mlp_ratio', 8.0), drop=config.get('drop', 0.0), drop_path=config.get('drop_path', 0.1),
-             spatio_kernel_enc=config.get('spatio_kernel_enc', 5), 
-             spatio_kernel_dec=config.get('spatio_kernel_dec', 5),
-             aft_seq_length=config.get('aft_seq_length', 20)
-        )
+def find_best_ckpt(save_dir: str) -> str:
+    """查找最优或最新的 Checkpoint 文件，优先 best.ckpt"""
+    best = os.path.join(save_dir, 'best.ckpt')
+    if os.path.exists(best): return best
     
-    def _interpolate_batch_gpu(self, batch_tensor: torch.Tensor, mode: str = 'max_pool') -> torch.Tensor:
-        if self.resize_shape is None: return batch_tensor
-        T, C, H, W = batch_tensor.shape[1:]
-        target_H, target_W = self.resize_shape
-        if H == target_H and W == target_W: return batch_tensor
-        
-        is_bool = batch_tensor.dtype == torch.bool
-        if is_bool: batch_tensor = batch_tensor.float()
-        
-        B = batch_tensor.shape[0]
-        batch_tensor = batch_tensor.view(B * T, C, H, W)
-        
-        if mode == 'max_pool':
-            processed_tensor = F.adaptive_max_pool2d(batch_tensor, output_size=self.resize_shape) if target_H < H or target_W < W else F.interpolate(batch_tensor, size=self.resize_shape, mode='bilinear', align_corners=False)
-        elif mode in ['nearest', 'bilinear']:
-            align = False if mode == 'bilinear' else None
-            processed_tensor = F.interpolate(batch_tensor, size=self.resize_shape, mode=mode, align_corners=align)
-        else:
-            raise ValueError(f"Unsupported interpolation mode: {mode}")
-
-        processed_tensor = processed_tensor.view(B, T, C, target_H, target_W)
-        if is_bool: processed_tensor = processed_tensor.bool()
-        return processed_tensor
-
-    def configure_optimizers(self) -> OptimizerLRScheduler:
-        max_epochs = getattr(self.hparams, 'max_epochs', 100)
-        optimizer, scheduler, by_epoch = get_optim_scheduler(self.hparams, max_epochs, self.model)
-        
-        return cast(OptimizerLRScheduler, {
-            "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler, 
-                "interval": "epoch" if by_epoch else "step"
-            },
-        })
-
-    def lr_scheduler_step(self, scheduler: Any, metric: Any):
-        if any(isinstance(scheduler, sch) for sch in timm_schedulers):
-            scheduler.step(epoch=self.current_epoch)
-        else:
-            scheduler.step(metric) if metric is not None else scheduler.step()
-
-    def forward(self, x):
-        return self.model(x)
-
-    def training_step(self, batch, batch_idx):
-        _, x, y, target_mask, _ = batch
-        target_mask = target_mask.bool()
-
-        x = self._interpolate_batch_gpu(x, mode='max_pool')
-        y = self._interpolate_batch_gpu(y, mode='max_pool')
-        target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
-        
-        MM_MAX_PHYSICAL = 30.0 
-        y_for_binning = y * MM_MAX_PHYSICAL 
-
-        logits_pred = self(x)
-        loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
-        
-        self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
-        return loss
+    last = os.path.join(save_dir, 'last.ckpt')
+    if os.path.exists(last): return last
     
-    def _decode_prediction(self, logits: torch.Tensor, method='expectation') -> torch.Tensor:
-        """ 
-        解码预测结果 (Logits -> Normalized Value)
+    cpts = sorted(glob.glob(os.path.join(save_dir, '*.ckpt')))
+    if len(cpts) > 0: return cpts[-1]
         
-        Args:
-            logits: [B, T, Num_Bins, H, W]
-            method: 
-                - 'expectation': (推荐) 概率加权平均，保留更多细节，缓解全0问题。
-                - 'argmax': 硬分类，只取最大概率的类别中心值。
-        """
-        # 1. 计算 Softmax 概率: [B, T, Num_Bins, H, W]
-        probs = F.softmax(logits, dim=2)
+    raise FileNotFoundError(f'No checkpoint found in {save_dir}')
+
+def parse_args():
+    """解析命令行参数"""
+    parser = argparse.ArgumentParser(description='Train SCWDS Probabilistic SimVP Model (Transfer Learning)')
+    
+    # --- 基础路径与数据参数 ---
+    parser.add_argument('--data_path', type=str, default='data/samples.jsonl', help='Path to training data')
+    parser.add_argument('--save_dir', type=str, default='./output/prob_simvp', help='Output directory')
+    parser.add_argument('--in_shape', type=int, nargs=4, default=None) 
+    parser.add_argument('--batch_size', type=int, default=None)
+    parser.add_argument('--max_epochs', type=int, default=30, help='微调的最大训练轮数')
+    parser.add_argument('--num_workers', type=int, default=None)
+    parser.add_argument('--aft_seq_length', type=int, default=None)
+
+    # --- [核心改进] 概率分箱与 Loss 参数 ---
+    parser.add_argument('--num_bins', type=int, default=40, help='概率分箱的数量 (建议降低至 40)')
+    parser.add_argument('--sigma', type=float, default=2.0, help='高斯软标签的标准差 (Gaussian Soft Label Sigma)')
+    parser.add_argument('--use_focal', type=str, default='true', help='是否启用 Focal Loss (true/false)')
+    parser.add_argument('--gamma', type=float, default=2.0, help='Focal Loss 的聚焦参数')
+
+    # --- [迁移学习参数] ---
+    parser.add_argument('--base_ckpt_dir', type=str, required=True, help='SimVP基座模型目录，用于加载 backbone')
+    parser.add_argument('--ckpt_path', type=str, default=None, help='直接加载特定权重的路径 (Resume)')
+    
+    # --- 模型结构参数 (用于覆盖 Config) ---
+    parser.add_argument('--model_type', type=str, default=None)
+    parser.add_argument('--hid_S', type=int, default=None)
+    parser.add_argument('--hid_T', type=int, default=None)
+    parser.add_argument('--N_S', type=int, default=None)
+    parser.add_argument('--N_T', type=int, default=None)
+    parser.add_argument('--mlp_ratio', type=float, default=None)
+    parser.add_argument('--drop', type=float, default=None)
+    parser.add_argument('--drop_path', type=float, default=None)
+    
+    # --- 优化器 ---
+    parser.add_argument('--opt', type=str, default='adamw')
+    parser.add_argument('--lr', type=float, default=2e-4, help='微调学习率 (建议 2e-4)')
+    parser.add_argument('--sched', type=str, default='cosine')
+    parser.add_argument('--min_lr', type=float, default=1e-5)
+    parser.add_argument('--warmup_epoch', type=int, default=2)
+    parser.add_argument('--accumulate_grad_batches', type=int, default=1)
+    parser.add_argument('--gradient_clip_val', type=float, default=1.0)
+    
+    # --- 设备与精度 ---
+    parser.add_argument('--accelerator', type=str, default='cuda')
+    parser.add_argument('--devices', type=str, default='auto')
+    parser.add_argument('--precision', type=str, default='bf16-mixed')
+    
+    # --- 早停 ---
+    parser.add_argument('--early_stop_patience', type=int, default=10)
+    parser.add_argument('--early_stop_monitor', type=str, default='val_score')
+    parser.add_argument('--early_stop_mode', type=str, default='max')
+
+    return parser.parse_args()
+
+def main():
+    torch.set_float32_matmul_precision('high')
+    args = parse_args()
+    
+    # 1. 参数预处理
+    # 过滤掉 None 值，准备传递给 SimVPConfig
+    # 注意：SimVPConfig 可能不包含 sigma/gamma 等新参数，需后续单独注入
+    config_kwargs = {k: v for k, v in vars(args).items() if v is not None}
+    
+    if 'in_shape' in config_kwargs: config_kwargs['in_shape'] = tuple(config_kwargs['in_shape'])
+    
+    # 布尔值处理
+    if isinstance(config_kwargs.get('use_focal'), str):
+        config_kwargs['use_focal'] = config_kwargs['use_focal'].lower() == 'true'
+
+    # 强制设置 out_channels = num_bins
+    num_bins = config_kwargs.get('num_bins', 40)
+    config_kwargs['out_channels'] = num_bins 
+    
+    # 2. 初始化 Config
+    try:
+        # 移除 config 类不支持的参数，防止报错
+        valid_keys = SimVPConfig.model_fields.keys()
+        safe_kwargs = {k: v for k, v in config_kwargs.items() if k in valid_keys}
         
-        # 确保 bin_tool 在正确设备
-        if hasattr(self.bin_tool, 'to') and self.bin_tool.device != logits.device:
-            self.bin_tool.to(logits.device)
+        config = SimVPConfig(**safe_kwargs)
+    except ValidationError as e:
+        MLOGI(f"[ERROR] Config Validation: {e}")
+        return
+
+    l.seed_everything(config.seed)
+
+    # 3. 初始化 DataModule
+    data_module = ScwdsDataModule(
+        data_path=config.data_path,
+        resize_shape=config.resize_shape,
+        batch_size=config.batch_size,
+        num_workers=config.num_workers,
+        train_split=config.train_split,
+        val_split=config.val_split,
+        test_split=config.test_split,
+        seed=config.seed
+    )
+    
+    # 4. 初始化模型 (参数注入)
+    model_args = config.to_dict()
+    
+    # [关键] 将 Loss 相关的新参数注入 model_args
+    # ProbabilisticSimVP 需要在 __init__ 中接收这些参数并传递给 Loss
+    model_args['num_bins'] = num_bins
+    model_args['sigma'] = config_kwargs.get('sigma', 2.0)
+    model_args['use_focal'] = config_kwargs.get('use_focal', True)
+    model_args['gamma'] = config_kwargs.get('gamma', 2.0)
+    
+    MLOGI(f"[Init] Initializing ProbabilisticSimVP with: Bins={num_bins}, Sigma={model_args['sigma']}, Focal={model_args['use_focal']}")
+    
+    model = ProbabilisticSimVP(**model_args)
+
+    # 5. 迁移学习：加载基座权重
+    base_ckpt_path = args.ckpt_path
+    if base_ckpt_path is None:
+        try:
+            base_ckpt_path = find_best_ckpt(args.base_ckpt_dir)
+        except FileNotFoundError:
+            MLOGI(f"[WARNING] 未在 {args.base_ckpt_dir} 找到 Checkpoint，将从头开始训练。")
+            base_ckpt_path = None
+    
+    if base_ckpt_path:
+        MLOGI(f"🚀 启用迁移学习: 载入 SimVP 基座权重自: {base_ckpt_path}")
+        try:
+            ckpt = torch.load(base_ckpt_path, map_location='cpu')
+            state_dict = ckpt['state_dict'] if 'state_dict' in ckpt else ckpt
             
-        centers = self.bin_tool.centers.to(logits.device) # [Num_Bins]
-        
-        if method == 'expectation':
-            # === 期望解码 (Soft Argmax) ===
-            # y = sum(p_i * center_i)
-            # 调整 centers 形状以进行广播: [1, 1, Num_Bins, 1, 1]
-            centers_reshaped = centers.view(1, 1, -1, 1, 1)
-            y_pred = (probs * centers_reshaped).sum(dim=2) # -> [B, T, H, W]
-        else:
-            # === Argmax 解码 ===
-            pred_idx = torch.argmax(probs, dim=2)
-            y_pred = self.bin_tool.class_to_value(pred_idx) 
-        
-        # 阈值清理 (去除极小的底噪)
-        y_pred[y_pred < 0.05] = 0.0
-        
-        MM_MAX = 30.0
-        y_pred_normalized = y_pred / MM_MAX
-        
-        # 恢复 Channel 维度 -> [B, T, 1, H, W]
-        return torch.clamp(y_pred_normalized, 0.0, 1.0).unsqueeze(2)
+            new_state_dict = {}
+            for k, v in state_dict.items():
+                # 跳过 readout 层 (维度从 1 变为 num_bins，无法匹配)
+                if 'model.readout' in k: 
+                    continue
+                new_state_dict[k] = v
 
-    def validation_step(self, batch, batch_idx):
-        metadata, x, y, target_mask, input_mask = batch
-        x = self._interpolate_batch_gpu(x, mode='max_pool')
-        y = self._interpolate_batch_gpu(y, mode='max_pool')
-        target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
-        
-        logits_pred = self(x)
-        
-        MM_MAX_PHYSICAL = 30.0 
-        y_for_binning = y * MM_MAX_PHYSICAL
+            model.load_state_dict(new_state_dict, strict=False)
+            MLOGI("[INFO] Backbone 权重加载成功。Readout 层将从随机初始化开始学习。")
 
-        # 1. 计算 Val Loss
-        val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
-        self.log('val_loss', val_loss, on_epoch=True, prog_bar=True, sync_dist=True)
-
-        # 2. 解码预测 (使用 Expectation 模式)
-        y_pred_clamped = self._decode_prediction(logits_pred, method='expectation')
-        
-        # 3. 计算 MAE
-        val_mae = F.l1_loss(y_pred_clamped, y)
-        self.log('val_mae', val_mae, on_epoch=True, sync_dist=True)
-
-        # ====================================================
-        # 4. [Fix] 计算 TS 评分 (解决 val_score=0 问题)
-        # ====================================================
-        
-        # 准备数据: [B, T, H, W] (物理量 mm)
-        pred_mm = y_pred_clamped.squeeze(2) * MM_MAX_PHYSICAL
-        target_mm = y.squeeze(2) * MM_MAX_PHYSICAL
-        
-        # 阈值与权重
-        thresholds = [0.1, 1.0, 2.0, 5.0, 8.0]
-        level_weights = [0.1, 0.1, 0.2, 0.25, 0.35]
-        
-        # 时效权重 (针对 20 帧输出)
-        time_weights_list = [
-            0.0075, 0.02, 0.03, 0.04, 0.05, 0.06, 0.07, 0.08, 0.09, 0.1,
-            0.09, 0.08, 0.07, 0.06, 0.05, 0.04, 0.03, 0.02, 0.0075, 0.005
-        ]
-        T_out = pred_mm.shape[1]
-        if T_out == 20:
-            time_weights = torch.tensor(time_weights_list, device=self.device)
-        else:
-            time_weights = torch.ones(T_out, device=self.device) / T_out
-
-        total_score = 0.0
-        total_level_weight = sum(level_weights)
-
-        for t_val, w_level in zip(thresholds, level_weights):
-            # 计算 Hits, Misses, False Alarms
-            # 注意：在 Batch 和 空间维度 (H, W) 上求和，保留时间维度
-            hits = ((pred_mm >= t_val) & (target_mm >= t_val)).float().sum(dim=(0, 2, 3))
-            misses = ((pred_mm < t_val) & (target_mm >= t_val)).float().sum(dim=(0, 2, 3))
-            false_alarms = ((pred_mm >= t_val) & (target_mm < t_val)).float().sum(dim=(0, 2, 3))
+            # [可选] 冻结 Backbone 1个 Epoch (Warmup)
+            # for param in model.model.parameters():
+            #     param.requires_grad = False
+            # for param in model.model.readout.parameters():
+            #     param.requires_grad = True
             
-            # TS per frame: [T]
-            ts_t = hits / (hits + misses + false_alarms + 1e-6)
-            
-            # 时效加权: sum(TS_t * W_t)
-            ts_weighted_time = (ts_t * time_weights).sum()
-            
-            # 强度加权累加
-            total_score += ts_weighted_time * w_level
+        except Exception as e:
+            MLOGI(f"[ERROR] 加载基座模型权重失败: {e}。将从随机初始化开始训练。")
 
-        # 归一化
-        val_score = total_score / total_level_weight
-        self.log('val_score', val_score, on_epoch=True, prog_bar=True, sync_dist=True)
+    # 6. Callbacks
+    monitor_metric = config.early_stop_monitor
+    monitor_mode = config.early_stop_mode
 
-    def test_step(self, batch, batch_idx):
-        metadata, x, y, target_mask, input_mask = batch
-        x = self._interpolate_batch_gpu(x, mode='max_pool')
-        y = self._interpolate_batch_gpu(y, mode='max_pool')
-        target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
-        
-        logits_pred = self(x)
-        # 测试时也建议使用 expectation 模式以获得更鲁棒的指标
-        y_pred_clamped = self._decode_prediction(logits_pred, method='expectation')
-        
-        MM_MAX_PHYSICAL = 30.0 
-        y_for_binning = y * MM_MAX_PHYSICAL
-        val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
-        self.log('test_loss', val_loss, on_epoch=True)
-        
-        return {
-            'inputs': x[0].cpu().float().numpy(),
-            'preds': y_pred_clamped[0].cpu().float().numpy(),
-            'trues': y[0].cpu().float().numpy()
-        }
+    callbacks = [
+        EarlyStopping(
+            monitor=monitor_metric, 
+            min_delta=config.early_stop_min_delta, 
+            patience=config.early_stop_patience, 
+            mode=monitor_mode, 
+            verbose=True
+        ),
+        ModelCheckpoint(
+            dirpath=config.save_dir, 
+            filename="prob-{epoch:02d}-{val_score:.4f}",
+            monitor=monitor_metric,
+            save_top_k=3, 
+            mode=monitor_mode,
+            save_last=True 
+        ),
+        LearningRateMonitor(logging_interval="step")
+    ]
 
-    def infer_step(self, batch, batch_idx):
-        metadata, x, input_mask = batch 
-        x = self._interpolate_batch_gpu(x, mode='max_pool')
-        logits_pred = self(x)
-        # 推理时使用 expectation 模式
-        y_pred_clamped = self._decode_prediction(logits_pred, method='expectation')
-        return y_pred_clamped
+    logger = TensorBoardLogger(save_dir=config.save_dir, name=config.model_name, version=datetime.now().strftime("%Y%m%d-%H%M%S"))
 
-    def predict_step(self, batch, batch_idx, dataloader_idx=0):
-        return self.infer_step(batch, batch_idx)
+    strategy = 'ddp_find_unused_parameters_false' if config.devices != 1 and config.accelerator == 'cuda' else 'auto'
+
+    trainer = l.Trainer(
+        max_epochs=config.max_epochs,
+        default_root_dir=config.save_dir,
+        precision=config.precision,
+        accelerator=config.accelerator,
+        devices=config.devices,
+        callbacks=callbacks,
+        logger=logger,
+        log_every_n_steps=config.log_every_n_steps,
+        val_check_interval=config.val_check_interval,
+        gradient_clip_val=config.gradient_clip_val,
+        strategy=strategy,
+        sync_batchnorm=False, 
+        enable_progress_bar=config.enable_progress_bar,
+        enable_model_summary=config.enable_model_summary,
+        num_sanity_val_steps=config.num_sanity_val_steps,
+    )
+
+    # 7. 开始训练
+    trainer.fit(model, datamodule=data_module, ckpt_path=args.ckpt_path)
+
+if __name__ == "__main__":
+    main()

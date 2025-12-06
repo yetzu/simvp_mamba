@@ -89,52 +89,93 @@ class ProbabilisticBinningTool:
 
 class ProbabilisticCrossEntropyLoss(nn.Module):
     """
-    概率分箱模式下的加权交叉熵 Loss
-    使用 ProbabilisticBinningTool 提供的类别权重进行训练
+    [改进版] 概率分箱损失函数 v2
+    集成 Gaussian Soft Labels (解决序数问题) + Focal Loss (解决虚警与权重过激问题)
     """
-    def __init__(self, num_bins=64, max_val=30.0):
+    def __init__(self, num_bins=64, max_val=30.0, sigma=2.0, use_focal=True, gamma=2.0):
         super().__init__()
         self.num_bins = num_bins
         self.max_val = max_val
+        self.sigma = sigma          # 高斯分布标准差：控制软标签的"宽窄"，建议 1.0~2.0
+        self.use_focal = use_focal  # 是否启用 Focal Loss：强烈建议启用
+        self.gamma = gamma          # Focal聚焦参数：通常取 2.0
+        
+        # 初始化工具类
         self.bin_tool = ProbabilisticBinningTool(num_bins, max_val, device='cpu')
+        
+        # [优化] 重算更温和的权重，避免 400x 差异导致梯度爆炸
+        # 原逻辑: 0.05 -> 20.0 (400倍)
+        # 新逻辑: 对数平滑 + 适度增强高值区 (约 1.0 -> 5.0)
+        raw_weights = self.bin_tool.class_weights_np
+        smoothed_weights = np.log1p(raw_weights) + 0.5 
+        smoothed_weights[-10:] *= 2.0  # 依然对强降水保持关注，但不极端
+        
+        self.register_buffer('smooth_weights', torch.tensor(smoothed_weights, dtype=torch.float32))
 
     def forward(self, logits, target, mask=None):
-        # 动态创建/移动 bin_tool 到当前设备
+        """
+        logits: [B, T, Num_Bins, H, W]
+        target: [B, T, 1, H, W] (连续物理值)
+        """
+        # 自动设备同步
         if self.bin_tool.device != logits.device:
-            if hasattr(self.bin_tool, 'to'):
-                self.bin_tool.to(logits.device)
-            else:
-                self.bin_tool = ProbabilisticBinningTool(
-                    self.num_bins, 
-                    self.max_val, 
-                    device=logits.device
-                )
+            if hasattr(self.bin_tool, 'to'): self.bin_tool.to(logits.device)
+            else: self.bin_tool = ProbabilisticBinningTool(self.num_bins, self.max_val, device=logits.device)
         
-        # 1. Target 转换为类别
+        # 1. 生成高斯软标签 (Gaussian Soft Target)
         with torch.no_grad():
             target_squeeze = target.squeeze(2) # [B, T, H, W]
-            target_cls = self.bin_tool.to_class(target_squeeze)
+            target_cls = self.bin_tool.to_class(target_squeeze) # [B, T, H, W] (Index)
             
+            # 创建 bin 索引网格，计算每个 Bin 与 真值 Bin 的距离
+            # [1, 1, 1, 1, Num_Bins]
+            bin_indices = torch.arange(self.num_bins, device=logits.device).view(1, 1, 1, 1, -1)
+            target_cls_unsqueezed = target_cls.unsqueeze(-1)
+            
+            # 高斯分布核心: exp(- dist^2 / 2sigma^2)
+            dist_sq = (bin_indices - target_cls_unsqueezed).pow(2)
+            soft_target = torch.exp(-dist_sq / (2 * self.sigma ** 2))
+            
+            # 归一化 (Sum=1)
+            soft_target = soft_target / (soft_target.sum(dim=-1, keepdim=True) + 1e-8)
+            
+            # 展平 [N, Num_Bins]
+            soft_target_flat = soft_target.view(-1, self.num_bins)
+            
+            # 获取对应的平滑类别权重 [N]
+            target_flat = target_cls.reshape(-1)
+            sample_weights = self.smooth_weights.to(logits.device)[target_flat]
+
+        # 2. 计算预测概率
         B, T, C, H, W = logits.shape
-        
-        # 2. Reshape Logits 和 Target
+        # [N, C]
         logits_flat = logits.permute(0, 1, 3, 4, 2).reshape(-1, C)
-        target_flat = target_cls.reshape(-1)
+        log_probs = F.log_softmax(logits_flat, dim=1) # Log Softmax
         
-        # 3. 计算加权 CE Loss
-        class_weights = self.bin_tool.class_weights.to(logits.device)
-        loss = F.cross_entropy(
-            logits_flat, 
-            target_flat, 
-            weight=class_weights,
-            reduction='none'
-        )
+        # 3. 计算基础交叉熵 (Soft Target Cross Entropy)
+        # CE = - sum(target * log_prob)
+        ce_per_class = - (soft_target_flat * log_probs)
         
-        # 4. 应用 Mask
+        # 4. 应用 Focal Loss 机制
+        if self.use_focal:
+            # weight = (1 - p)^gamma
+            # p 是模型对该类别的预测概率。这里近似使用 exp(log_probs)
+            probs = torch.exp(log_probs)
+            # 这里的 Focal 权重是针对每个类别的，不仅针对正确类别
+            focal_weight = (1 - probs).pow(self.gamma)
+            
+            # 最终 Loss = Focal_Weight * Soft_Target * CE
+            loss_per_sample = (focal_weight * ce_per_class).sum(dim=1)
+        else:
+            loss_per_sample = ce_per_class.sum(dim=1)
+            
+        # 5. 应用类别平衡权重 & Mask
+        loss_per_sample = loss_per_sample * sample_weights
+        
         if mask is not None:
             mask_flat = mask.view(-1)
-            loss = (loss * mask_flat).sum() / (mask_flat.sum() + 1e-6)
+            loss = (loss_per_sample * mask_flat).sum() / (mask_flat.sum() + 1e-6)
         else:
-            loss = loss.mean()
+            loss = loss_per_sample.mean()
             
         return loss

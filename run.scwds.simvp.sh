@@ -110,29 +110,33 @@ case $MODE in
         ;;
 
     # ============================================================
-    # 4. 训练概率分箱模型 (Stage 2: Transfer Learning)
+    # 4. 训练概率分箱模型 (Stage 2: Transfer Learning) - 改进版参数
     # ============================================================
     "train_prob")
         echo "--------------------------------------------------------"
-        echo "🚀 开始微调 Probabilistic Mamba (Transfer Learning)..."
+        echo "🚀 开始微调 Probabilistic Mamba (Focal + Soft Label)..."
         echo "--------------------------------------------------------"
         
-        # 注意: --base_ckpt_dir 指向 Stage 1 的输出目录，用于自动查找 best.ckpt 进行加载
+        # 注意：num_bins 降为 40，lr 提至 2e-4，启用 focal 和 sigma
         python run/train_scwds_prob.py \
             --data_path data/samples.jsonl \
             --base_ckpt_dir ./output/simvp \
             --save_dir ./output/prob_simvp \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --num_bins 64 \
+            \
+            --num_bins 40 \
+            --sigma 2.0 \
+            --use_focal true \
+            --gamma 2.0 \
             \
             --batch_size 4 \
             --num_workers 8 \
             --max_epochs 30 \
             \
-            --lr 1e-4 \
+            --lr 2e-4 \
             --min_lr 1e-6 \
-            --warmup_epoch 2 \
+            --warmup_epoch 5 \
             \
             --early_stop_patience 10 \
             --accelerator cuda \
@@ -141,7 +145,7 @@ case $MODE in
         ;;
 
     # ============================================================
-    # 5. 测试概率分箱模型
+    # 5. 测试概率分箱模型 - 参数同步
     # ============================================================
     "test_prob")
         echo "----------------------------------------"
@@ -152,14 +156,15 @@ case $MODE in
             --data_path data/samples.jsonl \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --num_bins 64 \
+            --num_bins 40 \
             --save_dir ./output/prob_simvp \
+            --base_ckpt_dir ./output/simvp \
             --num_samples 10 \
             --accelerator cuda:0
         ;;
-
+    
     # ============================================================
-    # 6. 推理概率分箱模型
+    # 6. 推理概率分箱模型 - 参数同步
     # ============================================================
     "infer_prob")
         echo "----------------------------------------"
@@ -169,7 +174,7 @@ case $MODE in
         python run/infer_scwds_prob.py \
             --data_path data/samples.testset.jsonl \
             --in_shape 20 54 256 256 \
-            --num_bins 64 \
+            --num_bins 40 \
             --save_dir ./output/prob_simvp \
             --accelerator cuda:0 \
             --vis \
