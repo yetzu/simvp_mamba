@@ -175,6 +175,25 @@ case $MODE in
             --vis \
             --vis_output ./output/prob_simvp/vis_infer
         ;;
+
+    # ============================================================
+    # 7. 推理 SimVP 基座 + Soft-GPM 后处理
+    # ============================================================
+    "infer_gpm")
+        echo "----------------------------------------"
+        echo "🔮 开始推理 SimVP (Soft-GPM) 模型..."
+        echo "----------------------------------------"
+        
+        python run/infer_scwds_simvp_gpm.py \
+            --data_path data/samples.testset.jsonl \
+            --in_shape 20 54 256 256 \
+            --save_dir ./output/simvp \
+            --accelerator cuda:0 \
+            --vis \
+            --vis_output ./output/simvp/vis_infer_gpm \
+            --gpm_alpha 0.5 \
+            --gpm_decay 0.98
+        ;;
         
 esac
 
