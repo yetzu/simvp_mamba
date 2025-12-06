@@ -191,7 +191,7 @@ class HybridLoss(nn.Module):
         # [关键] 必须使用 reduction='none' 才能支持后续的 Pixel-Wise 加权和 Masking
         self.l1 = nn.L1Loss(reduction='none') 
         
-        if TORCHMETRICS_AVAILABLE and ssim_weight > 0:
+        if ssim_weight > 0:
             self.ms_ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0, reduction='none')
         else:
             self.ms_ssim = None

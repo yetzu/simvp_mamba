@@ -1,3 +1,5 @@
+# metai/model/simvp/prob_loss.py
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -46,6 +48,14 @@ class ProbabilisticBinningTool:
         self.centers = torch.tensor(self.centers_np, dtype=torch.float32).to(device)
         self.class_weights = torch.tensor(self.class_weights_np, dtype=torch.float32).to(device)
 
+    # [Fix] 新增 to 方法以修复 AttributeError
+    def to(self, device):
+        """将工具类内部的 Tensor 移动到指定设备"""
+        self.device = device
+        self.edges = self.edges.to(device)
+        self.centers = self.centers.to(device)
+        self.class_weights = self.class_weights.to(device)
+        return self
 
     def _calculate_weights(self):
         """计算并返回权重 numpy 数组"""
@@ -93,11 +103,15 @@ class ProbabilisticCrossEntropyLoss(nn.Module):
     def forward(self, logits, target, mask=None):
         # 动态创建/移动 bin_tool 到当前设备 (保证鲁棒性)
         if self.bin_tool.device != logits.device:
-            self.bin_tool = ProbabilisticBinningTool(
-                self.num_bins, 
-                self.max_val, 
-                device=logits.device
-            )
+            # 优先尝试使用 to 方法（如果已添加），否则重新实例化
+            if hasattr(self.bin_tool, 'to'):
+                self.bin_tool.to(logits.device)
+            else:
+                self.bin_tool = ProbabilisticBinningTool(
+                    self.num_bins, 
+                    self.max_val, 
+                    device=logits.device
+                )
         
         # 1. Target 转换为类别 (不可导)
         with torch.no_grad():

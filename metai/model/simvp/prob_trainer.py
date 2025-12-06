@@ -4,20 +4,17 @@ import torch
 import torch.nn.functional as F
 import lightning as l
 from typing import Any, Dict, cast
+from lightning.pytorch.utilities.types import OptimizerLRScheduler
+
 from metai.model.core import get_optim_scheduler, timm_schedulers
 from metai.model.simvp.prob_loss import ProbabilisticCrossEntropyLoss, ProbabilisticBinningTool
 from .prob_model import ProbabilisticSimVP_Model
-from metai.model.simvp.simvp_trainer import SimVP # 引入 SimVP Trainer 中的辅助函数
+# from metai.model.simvp.simvp_trainer import SimVP # 不再需要直接导入 SimVP 类方法
 
 class ProbabilisticSimVP(l.LightningModule):
     """
     概率分箱 SimVP-Mamba 训练器 (Lightning Module)
     使用 ProbabilisticCrossEntropyLoss 替换 HybridLoss。
-    
-    [修正说明]
-    目标真值 y 来自 DataLoader，是相对于 300.0 (RA文件的最大值) 归一化的 [0, 1] 尺度。
-    ProbabilisticBinningTool 期望的输入是毫米绝对值 [0, 30.0]。
-    因此，在计算 Loss 前，需要将 y 乘以 30.0 进行尺度转换。
     """
     def __init__(self, **args):
         super(ProbabilisticSimVP, self).__init__()
@@ -40,34 +37,60 @@ class ProbabilisticSimVP(l.LightningModule):
             num_bins=self.num_bins, max_val=30.0, device='cpu'
         )
         
-        # 4. 其他配置 (保持与 SimVP Trainer 一致)
+        # 4. 其他配置
         rs = config.get('resize_shape', None)
         self.resize_shape = tuple(rs) if rs is not None else None
         
-        # 5. 核心修改：禁用原有复杂的课程学习逻辑 (SimVP Trainer 中的逻辑)
+        # 5. 核心修改：禁用原有复杂的课程学习逻辑
         self.use_curriculum_learning = False
         self.auto_test_after_epoch = config.get('auto_test_after_epoch', True)
         
-        # 6. 辅助工具 (复用 SimVP Trainer 中的 GPU 插值逻辑)
-        self._interpolate_batch_gpu = SimVP._interpolate_batch_gpu
+        # [Fix] 移除错误的函数赋值，直接在该类中实现 _interpolate_batch_gpu
+        # self._interpolate_batch_gpu = SimVP._interpolate_batch_gpu 
         
-        # 7. 确保 Bin Tool 最终在正确的设备
+        # 7. 确保 Bin Tool 最终在正确的设备 (使用之前修复的 to 方法)
         if self.bin_tool.device != self.device:
-             self.bin_tool.to(self.device)
+             # 检查 bin_tool 是否有 to 方法 (防御性编程)
+             if hasattr(self.bin_tool, 'to'):
+                 self.bin_tool.to(self.device)
 
     def _build_model(self, config: Dict[str, Any]):
         return ProbabilisticSimVP_Model(
              in_shape=config.get('in_shape'), hid_S=config.get('hid_S', 128), 
              hid_T=config.get('hid_T', 512), N_S=config.get('N_S', 4), N_T=config.get('N_T', 12),
-             model_type=config.get('model_type', 'mamba'), out_channels=self.num_bins, # 传入 num_bins
+             model_type=config.get('model_type', 'mamba'), out_channels=self.num_bins,
              mlp_ratio=config.get('mlp_ratio', 8.0), drop=config.get('drop', 0.0), drop_path=config.get('drop_path', 0.1),
              spatio_kernel_enc=config.get('spatio_kernel_enc', 3), 
              spatio_kernel_dec=config.get('spatio_kernel_dec', 3),
              aft_seq_length=config.get('aft_seq_length', 20)
         )
     
+    # [Fix] 直接在类中实现插值方法，避免 unbound method 错误
+    def _interpolate_batch_gpu(self, batch_tensor: torch.Tensor, mode: str = 'max_pool') -> torch.Tensor:
+        if self.resize_shape is None: return batch_tensor
+        T, C, H, W = batch_tensor.shape[1:]
+        target_H, target_W = self.resize_shape
+        if H == target_H and W == target_W: return batch_tensor
+        
+        is_bool = batch_tensor.dtype == torch.bool
+        if is_bool: batch_tensor = batch_tensor.float()
+        
+        B = batch_tensor.shape[0]
+        batch_tensor = batch_tensor.view(B * T, C, H, W)
+        
+        if mode == 'max_pool':
+            processed_tensor = F.adaptive_max_pool2d(batch_tensor, output_size=self.resize_shape) if target_H < H or target_W < W else F.interpolate(batch_tensor, size=self.resize_shape, mode='bilinear', align_corners=False)
+        elif mode in ['nearest', 'bilinear']:
+            align = False if mode == 'bilinear' else None
+            processed_tensor = F.interpolate(batch_tensor, size=self.resize_shape, mode=mode, align_corners=align)
+        else:
+            raise ValueError(f"Unsupported interpolation mode: {mode}")
+
+        processed_tensor = processed_tensor.view(B, T, C, target_H, target_W)
+        if is_bool: processed_tensor = processed_tensor.bool()
+        return processed_tensor
+
     def configure_optimizers(self) -> OptimizerLRScheduler:
-        # 优化器配置与 SimVP Trainer 保持一致
         max_epochs = getattr(self.hparams, 'max_epochs', 100)
         optimizer, scheduler, by_epoch = get_optim_scheduler(self.hparams, max_epochs, self.model)
         
@@ -80,14 +103,13 @@ class ProbabilisticSimVP(l.LightningModule):
         })
 
     def lr_scheduler_step(self, scheduler: Any, metric: Any):
-        # ... (与 SimVP Trainer 保持一致)
         if any(isinstance(scheduler, sch) for sch in timm_schedulers):
             scheduler.step(epoch=self.current_epoch)
         else:
             scheduler.step(metric) if metric is not None else scheduler.step()
 
     def forward(self, x):
-        return self.model(x) # 输出 Logits
+        return self.model(x)
 
     def training_step(self, batch, batch_idx):
         _, x, y, target_mask, _ = batch
@@ -97,74 +119,54 @@ class ProbabilisticSimVP(l.LightningModule):
         y = self._interpolate_batch_gpu(y, mode='max_pool')
         target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
         
-        # [关键修正] 目标值尺度转换：
-        # y: [B, T, 1, H, W] 当前是相对 300.0 (RA_max) 的归一化值 [0, 1]。
-        # ProbabilisticBinningTool 期望的尺度是毫米绝对值 [0, 30.0] (物理最大值)。
         MM_MAX_PHYSICAL = 30.0 
-        
-        # y_for_binning 是毫米绝对值，范围 [0, 30.0]
         y_for_binning = y * MM_MAX_PHYSICAL 
 
         logits_pred = self(x)
-        
-        # Loss 使用新的 CrossEntropy
-        # 传入正确尺度的目标值 y_for_binning
         loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
         
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
     def _decode_prediction(self, logits: torch.Tensor) -> torch.Tensor:
-        """ Argmax 解码: 从 Logits 还原为 mm 级降水值 """
+        """ Argmax 解码 """
         probs = F.softmax(logits, dim=2)
-        pred_idx = torch.argmax(probs, dim=2) # [B, T, H, W]
-        # 还原为 mm 级降水值 (使用 Binning Tool 的中心值)
+        pred_idx = torch.argmax(probs, dim=2)
+        
+        # 确保 bin_tool 在正确设备
+        if hasattr(self.bin_tool, 'to') and self.bin_tool.device != logits.device:
+            self.bin_tool.to(logits.device)
+            
         y_pred = self.bin_tool.class_to_value(pred_idx) 
         
-        # 归一化到 [0, 1] (除以 30.0 mm)，并添加 Channel 维度，以匹配原 Metric 逻辑
         MM_MAX = 30.0
         y_pred_normalized = y_pred / MM_MAX
-        return torch.clamp(y_pred_normalized, 0.0, 1.0).unsqueeze(2) # [B, T, 1, H, W]
+        return torch.clamp(y_pred_normalized, 0.0, 1.0).unsqueeze(2)
 
     def validation_step(self, batch, batch_idx):
         metadata, x, y, target_mask, input_mask = batch
-        # ... (数据准备与 Loss 计算 - 与 SimVP Trainer 保持一致) ...
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         y = self._interpolate_batch_gpu(y, mode='max_pool')
         target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
         
-        logits_pred = self(x) # [B, T, Num_Bins, H, W]
+        logits_pred = self(x)
         
-        # [关键修正] Loss 计算：将 y 转换为 mm 尺度 [0, 30.0]
         MM_MAX_PHYSICAL = 30.0 
         y_for_binning = y * MM_MAX_PHYSICAL
 
         val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
         self.log('val_loss', val_loss, on_epoch=True, prog_bar=True, sync_dist=True)
 
-        # 核心：使用 Argmax 解码
         y_pred_clamped = self._decode_prediction(logits_pred)
         
-        # ... (后续 TS Score 计算逻辑与 SimVP Trainer 保持一致) ...
-        MM_MAX = 30.0 # 物理最大值 30.0 mm
-        
-        # pred_mm 和 target_mm 都应是毫米绝对值 [0, 30.0]
-        pred_mm = y_pred_clamped.squeeze(2) * MM_MAX 
-        target_mm = y.squeeze(2) * MM_MAX # y (相对 300.0) * 30.0 = 绝对 mm 值 (最大 30.0)
-
-        # ... (TS Score 计算逻辑与 SimVP Trainer 保持一致) ...
-        # (由于 TS Score 的计算逻辑在 SimVP Trainer 中过于复杂，这里只保留 SimVP Trainer 的精简版本以保持代码完整性)
-        val_score = torch.tensor(0.0, device=self.device) # 占位，实际应使用 SimVP Trainer 的逻辑
         val_mae = F.l1_loss(y_pred_clamped, y)
+        val_score = torch.tensor(0.0, device=self.device) # 占位
 
         self.log('val_score', val_score, on_epoch=True, prog_bar=True, sync_dist=True)
         self.log('val_mae', val_mae, on_epoch=True, sync_dist=True)
 
-
     def test_step(self, batch, batch_idx):
-        # 与 validation_step 逻辑相似，但返回 Argmax 解码后的 preds
         metadata, x, y, target_mask, input_mask = batch
-        # ... (数据准备) ...
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         y = self._interpolate_batch_gpu(y, mode='max_pool')
         target_mask = self._interpolate_batch_gpu(target_mask, mode='nearest')
@@ -172,7 +174,6 @@ class ProbabilisticSimVP(l.LightningModule):
         logits_pred = self(x)
         y_pred_clamped = self._decode_prediction(logits_pred)
         
-        # Loss (仅用于记录)
         MM_MAX_PHYSICAL = 30.0 
         y_for_binning = y * MM_MAX_PHYSICAL
         val_loss = self.criterion(logits_pred, y_for_binning, mask=target_mask)
@@ -185,14 +186,10 @@ class ProbabilisticSimVP(l.LightningModule):
         }
 
     def infer_step(self, batch, batch_idx):
-        # 推理逻辑，直接返回 Argmax 解码后的结果
         metadata, x, input_mask = batch 
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         logits_pred = self(x)
-        
-        # Argmax 解码
         y_pred_clamped = self._decode_prediction(logits_pred)
-        
         return y_pred_clamped
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
