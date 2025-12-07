@@ -48,15 +48,18 @@ class ProbabilisticFinetuning(BaseFinetuning):
         self.unfreeze_at_epoch = unfreeze_at_epoch
 
     def freeze_before_training(self, pl_module):
-        # 冻结除 readout 外的所有层
-        # 注意：train_bn=False 意味着 BN 层的统计量(running_mean/var)不会更新，但 gamma/beta 会被冻结
+        # 冻结 Backbone
         self.freeze(pl_module.model.enc, train_bn=False)
         self.freeze(pl_module.model.hid, train_bn=False)
         self.freeze(pl_module.model.dec, train_bn=False)
         
-        # 确保 readout 是解冻的 (这是我们要从头训练的层)
-        self.make_trainable(pl_module.model.readout)
-        MLOGI("🥶 [Finetuning] Backbone frozen for warmup. Training only Readout layer.")
+        # [修改] 兼容检测：解冻 context_head (如果存在) 或 readout
+        if hasattr(pl_module.model, 'context_head'):
+            self.make_trainable(pl_module.model.context_head)
+            MLOGI("🥶 [Finetuning] Training Context Head.")
+        elif hasattr(pl_module.model, 'readout'):
+            self.make_trainable(pl_module.model.readout)
+            MLOGI("🥶 [Finetuning] Training Readout.")
 
     def finetune_function(self, pl_module, current_epoch, optimizer):
         # 在指定 epoch 解冻

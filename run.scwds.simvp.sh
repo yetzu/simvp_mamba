@@ -129,6 +129,8 @@ case $MODE in
             --sigma 2.0 \
             --use_focal true \
             --gamma 2.0 \
+            --spatio_kernel_enc 5 \
+            --spatio_kernel_dec 5 \
             \
             --batch_size 4 \
             --num_workers 8 \

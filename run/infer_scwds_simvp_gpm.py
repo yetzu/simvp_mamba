@@ -33,7 +33,7 @@ from metai.utils.met_config import get_config
 # 竞赛常量定义
 # ==========================
 USER_ID = "CP2025000081"
-TRACK_ID = "track1"
+TRACK_ID = "track"
 TIME_STEP_MINUTES = 6 
 
 # ==========================
