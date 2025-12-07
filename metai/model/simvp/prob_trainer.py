@@ -179,47 +179,52 @@ class ProbabilisticSimVP(l.LightningModule):
         self.log('train_loss', loss, on_step=True, on_epoch=True, prog_bar=True)
         return loss
     
-    def _decode_prediction(self, logits: torch.Tensor, method='expectation', temperature=0.8) -> torch.Tensor:
+    def _decode_prediction(self, logits: torch.Tensor, method='quantile', temperature=1.0, quantile=0.95) -> torch.Tensor:
         """ 
-        解码预测结果 (Logits -> Normalized Value [0,1])
-        
-        Args:
-            logits: 模型输出 [B, T, Num_Bins, H, W]
-            method: 解码方法 ('expectation' 或 'argmax')
-            temperature: 温度系数。T < 1.0 (如 0.8) 会锐化分布，增强置信度；T > 1.0 会平滑分布。
-                         在推理和验证时，推荐使用 0.8 以获得更锐利的预测。
+        解码预测结果 (SOTA 改进版)
+        method: 
+          - 'argmax': 取概率最大的类别 (保守，稳健，适合去噪) -> 导致漏报
+          - 'expectation': 取期望值 (平滑，极值偏低) -> 导致模糊
+          - 'quantile': 取累积概率超过阈值的类别 (激进，能恢复极值) -> [本次必用]
         """
-        # 1. 应用温度缩放 (Temperature Scaling)
-        logits = logits / temperature
+        # 1. 计算概率分布
+        # logits: [B, T, Num_Bins, H, W]
+        # 即使是 argmax/quantile，适当的 temperature (如 0.8) 也能帮助锐化分布
+        probs = F.softmax(logits / temperature, dim=2) 
         
-        # 2. 计算 Softmax 概率分布
-        probs = F.softmax(logits, dim=2) # [B, T, Num_Bins, H, W]
-        
-        # 确保 bin_tool 在正确设备
+        # 确保工具类在正确设备
         if hasattr(self.bin_tool, 'to') and self.bin_tool.device != logits.device:
             self.bin_tool.to(logits.device)
             
         centers = self.bin_tool.centers.to(logits.device) # [Num_Bins]
-        
+
         if method == 'expectation':
-            # === 期望解码 (Soft Argmax) ===
-            # y = sum(p_i * center_i)
-            # 调整 centers 形状以进行广播: [1, 1, Num_Bins, 1, 1]
             centers_reshaped = centers.view(1, 1, -1, 1, 1)
-            y_pred = (probs * centers_reshaped).sum(dim=2) # -> [B, T, H, W]
-        else:
-            # === Argmax 解码 ===
+            y_pred = (probs * centers_reshaped).sum(dim=2)
+            
+        elif method == 'argmax':
             pred_idx = torch.argmax(probs, dim=2)
-            y_pred = self.bin_tool.class_to_value(pred_idx) 
-        
-        # 阈值清理 (去除极小的底噪)
+            y_pred = self.bin_tool.class_to_value(pred_idx)
+            
+        elif method == 'quantile':
+            # === [核心修复] 分位数解码 ===
+            # 1. 计算累积概率分布 (CDF) -> [B, T, Num_Bins, H, W]
+            cdf = torch.cumsum(probs, dim=2)
+            
+            # 2. 找到第一个 CDF > quantile 的索引
+            # 逻辑：寻找分布的"右侧尾部"，强行提取高值
+            # 0.95 意味着我们取概率分布右侧最极端的 5% 的位置
+            pred_idx = (cdf > quantile).float().argmax(dim=2)
+            
+            y_pred = self.bin_tool.class_to_value(pred_idx)
+
+        # 阈值清理 (保留，去除极小的底噪)
         y_pred[y_pred < 0.05] = 0.0
         
-        # 归一化回 [0, 1] 区间
+        # 归一化回 [0, 1]
         MM_MAX = 30.0
         y_pred_normalized = y_pred / MM_MAX
         
-        # 恢复 Channel 维度 -> [B, T, 1, H, W]
         return torch.clamp(y_pred_normalized, 0.0, 1.0).unsqueeze(2)
 
     def validation_step(self, batch, batch_idx):
@@ -289,7 +294,7 @@ class ProbabilisticSimVP(l.LightningModule):
         logits_pred = self(x)
         
         # 测试时使用与验证一致的解码策略
-        y_pred_clamped = self._decode_prediction(logits_pred, method='expectation', temperature=0.8)
+        y_pred_clamped = self._decode_prediction(logits_pred, method='quantile', quantile=0.9)
         
         MM_MAX_PHYSICAL = 30.0 
         y_for_binning = y * MM_MAX_PHYSICAL
@@ -308,7 +313,7 @@ class ProbabilisticSimVP(l.LightningModule):
         x = self._interpolate_batch_gpu(x, mode='max_pool')
         logits_pred = self(x)
         # 推理时使用 expectation + temperature=0.8，获得高质量预测
-        y_pred_clamped = self._decode_prediction(logits_pred, method='expectation', temperature=0.8)
+        y_pred_clamped = self._decode_prediction(logits_pred, method='quantile', quantile=0.9)
         return y_pred_clamped
 
     def predict_step(self, batch, batch_idx, dataloader_idx=0):
