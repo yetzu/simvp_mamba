@@ -6,7 +6,7 @@ from timm.layers.drop import DropPath
 from timm.layers.weight_init import trunc_normal_
 from timm.models.convnext import ConvNeXtBlock
 from timm.models.mlp_mixer import MixerBlock
-from timm.models.swin_transformer import SwinTransformerBlock, window_partition, window_reverse
+from timm.models.swin_transformer import SwinTransformerBlock
 from timm.models.vision_transformer import Block as ViTBlock
 
 from .layers import (HorBlock, ChannelAggregationFFN, MultiOrderGatedAggregation,
@@ -589,16 +589,7 @@ class TAUSubBlock(GASubBlock):
 # [Corrected] metai/model/simvp/simvp_module.py (End of file)
 # ============================================================
 
-# 尝试导入 Mamba
-try:
-    from mamba_ssm import Mamba
-    MAMBA_AVAILABLE = True
-except ImportError:
-    MAMBA_AVAILABLE = False
-    class Mamba(nn.Module):
-        def __init__(self, *args, **kwargs):
-            super().__init__()
-            raise ImportError("Please install 'mamba_ssm' (pip install mamba-ssm) to use Mamba models.")
+from mamba_ssm import Mamba
 
 
 class TokenSpaceMLP(nn.Module):
