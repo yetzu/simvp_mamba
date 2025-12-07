@@ -46,5 +46,3 @@ nohup bash run.scwds.simvp.sh train > train_simvp_scwds.log 2>&1 &
 conda install -c conda-forge p7zip -y
 7za a -t7z 01.7z /home/dataset-local/SevereWeather_AI_2025/CP/TrainSet/01/ -mx=9 -mfb=273 -ms=on -mmt=on
 7za x 01.7z -o/tmp/restore/
-
-nohup bash run.scwds.simvp.sh train_prob > train_prob_simvp_scwds.log 2>&1 &
