@@ -38,7 +38,7 @@ case $MODE in
             --save_dir ./output/simvp \
             --batch_size 4 \
             --accumulate_grad_batches 8 \
-            --num_workers 8 \
+            --num_workers 4 \
             \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \

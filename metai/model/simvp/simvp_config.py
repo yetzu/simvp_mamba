@@ -69,10 +69,9 @@ class SimVPConfig(BaseModel):
     mlp_ratio: float = Field(default=8.0, description="MLP 扩展比例")
     drop: float = Field(default=0.0, description="Dropout 比率")
     drop_path: float = Field(default=0.1, description="Drop Path 比率")
-    spatio_kernel_enc: int = Field(default=3, description="编码器卷积核大小")
-    spatio_kernel_dec: int = Field(default=3, description="解码器卷积核大小")
+    spatio_kernel_enc: int = Field(default=5, description="编码器卷积核大小")
+    spatio_kernel_dec: int = Field(default=5, description="解码器卷积核大小")
     out_channels: int = Field(default=1, description="输出通道数")
-    num_bins: int = Field(default=40, description="概率分箱的数量 (分类数)")
 
     # 5. 损失函数配置
     loss_weight_l1: float = Field(default=1.0, description="L1 Loss 权重")
