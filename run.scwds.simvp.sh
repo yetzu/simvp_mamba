@@ -19,9 +19,6 @@ if [ $# -eq 0 ]; then
     echo " train      - 训练 SimVP 基座模型"
     echo " test       - 测试 SimVP 基座模型"
     echo " infer      - 使用 SimVP 基座进行推理"
-    echo " train_prob - 训练概率分箱模型 (迁移学习)"
-    echo " test_prob  - 测试概率分箱模型"
-    echo " infer_prob - 使用概率分箱模型进行推理"
     exit 1
 fi
 

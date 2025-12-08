@@ -36,8 +36,8 @@ class SimVP_Model(nn.Module):
     """
 
     def __init__(self, in_shape, hid_S=16, hid_T=256, N_S=4, N_T=4, model_type='gSTA',
-                 mlp_ratio=8., drop=0.0, drop_path=0.0, spatio_kernel_enc=5,
-                 spatio_kernel_dec=5, act_inplace=True, out_channels=None, 
+                 mlp_ratio=8., drop=0.0, drop_path=0.0, spatio_kernel_enc=3,
+                 spatio_kernel_dec=3, act_inplace=True, out_channels=None, 
                  aft_seq_length=None, **kwargs):
         super(SimVP_Model, self).__init__()
         

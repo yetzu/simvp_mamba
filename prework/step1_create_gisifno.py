@@ -23,7 +23,7 @@ def read_radar_format(stcd):
     """
     config_obj = get_config()
 
-    file_path = os.path.join(config_obj.root_path, "FORMAT", "RADAR_Format_File", f"RADA_Format_{stcd}.txt")
+    file_path = os.path.join(config_obj.root_path, "FORMAT", "RADAR_Format_DOC", f"RADA_Format_{stcd}.txt")
             
     if not os.path.exists(file_path):
         MLOGE(f"雷达格式文件不存在: {file_path}")
@@ -188,7 +188,7 @@ def main():
     args = parser.parse_args()
     
     config = get_config()
-    format_dir = os.path.join(config.root_path, "FORMAT", "RADAR_Format_File")
+    format_dir = os.path.join(config.root_path, "FORMAT", "RADAR_Format_DOC")
     
     if not os.path.exists(format_dir):
         MLOGE(f"未找到雷达格式目录: {format_dir}")

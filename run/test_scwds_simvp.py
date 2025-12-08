@@ -275,7 +275,6 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
     """
     绘制 Obs, GT, Pred, Diff 对比图
     修复：确保所有列都显示边框（移除 axis('off')，改为隐藏刻度）
-    修改：Input 标签从 In-0~9 改为 T-9~0
     """
     T = true_seq.shape[0] # T_out = 20
     rows, cols = 4, T
@@ -310,17 +309,12 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
             # 确保 Y 轴 Label 显示
             ax.yaxis.label.set_visible(True)
 
-    input_len = obs_mm.shape[0]
-
     for t in range(T):
         # 1. Obs (Input)
         ax = axes[0, t]
-        if t < input_len:
+        if t < obs_mm.shape[0]:
             ax.imshow(obs_mm[t], cmap=precip_cmap, norm=precip_norm)
-            # [修改] 标签逻辑：倒序显示 T-x
-            # 例如 input_len=10: t=0 -> T-9, t=9 -> T-0
-            time_idx = input_len - 1 - t
-            ax.set_title(f'T-{time_idx}', fontsize=6)
+            ax.set_title(f'In-{t}', fontsize=6)
         else:
             ax.imshow(np.zeros_like(true_mm[0]), cmap=precip_cmap, norm=precip_norm)
         
@@ -350,7 +344,7 @@ def plot_seq_visualization(obs_seq, true_seq, pred_seq, scores, out_path, vmax=1
     cbar_p = fig.colorbar(sm_precip, cax=cbar_ax_precip, orientation='horizontal', spacing='uniform')
     cbar_p.set_ticks([0.1, 1, 2, 5, 8])
     cbar_p.set_ticklabels(['0.1', '1', '2', '5', '8'])
-    cbar_p.set_label('Precipitation (mm)', fontsize=8)
+    cbar_p.set_label('Precipitation (mm/6min)', fontsize=8)
     cbar_p.ax.tick_params(labelsize=7)
     
     # --- Legend 2: Diff (右侧) ---

@@ -69,7 +69,7 @@ class MetRadar(MetBaseEnum):
     CAP70 = ("CAP70", 0, 800, -32768)
     ET = ("ET", 0, 150, -1280)
     HBR = ("HBR", 0, 800, -32768)
-    VIL = ("VIL", 0, 800, -1280)
+    VIL = ("VIL", 0, 8000, -1280)
 
 
 class MetNwp(MetBaseEnum):

@@ -4,8 +4,15 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.fft
-import numpy as np
-from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
+
+# 尝试导入 torchmetrics，如果不存在则提供回退方案
+# 注：Lightning 通常会自动安装 torchmetrics
+try:
+    from torchmetrics.image import MultiScaleStructuralSimilarityIndexMeasure
+    TORCHMETRICS_AVAILABLE = True
+except ImportError:
+    TORCHMETRICS_AVAILABLE = False
+    print("Warning: torchmetrics not found. MS-SSIM loss will be skipped.")
 
 
 class WeightedScoreSoftCSILoss(nn.Module):
@@ -191,7 +198,7 @@ class HybridLoss(nn.Module):
         # [关键] 必须使用 reduction='none' 才能支持后续的 Pixel-Wise 加权和 Masking
         self.l1 = nn.L1Loss(reduction='none') 
         
-        if ssim_weight > 0:
+        if TORCHMETRICS_AVAILABLE and ssim_weight > 0:
             self.ms_ssim = MultiScaleStructuralSimilarityIndexMeasure(data_range=1.0, reduction='none')
         else:
             self.ms_ssim = None
@@ -297,4 +304,3 @@ class HybridLoss(nn.Module):
         loss_dict['total'] = total_loss.item() if isinstance(total_loss, torch.Tensor) else total_loss
         
         return total_loss, loss_dict
-    

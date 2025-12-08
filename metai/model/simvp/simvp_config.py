@@ -37,9 +37,9 @@ class SimVPConfig(BaseModel):
     batch_size: int = Field(default=4, description="批大小 (单卡)")
     seed: int = Field(default=42, description="全局随机种子")
     num_workers: int = Field(default=4, description="DataLoader 工作线程数")
-    train_split: float = Field(default=0.8, description="训练集比例")
+    train_split: float = Field(default=0.85, description="训练集比例")
     val_split: float = Field(default=0.1, description="验证集比例")
-    test_split: float = Field(default=0.1, description="测试集比例")
+    test_split: float = Field(default=0.05, description="测试集比例")
     task_mode: str = Field(default='precipitation', description="任务模式")
 
     # 3. Trainer 配置
