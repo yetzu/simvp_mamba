@@ -42,7 +42,7 @@ case $MODE in
             \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --max_epochs 40 \
+            --max_epochs 100 \
             --opt adamw \
             --lr 8e-4 \
             --sched cosine \

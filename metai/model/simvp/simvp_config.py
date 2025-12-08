@@ -31,7 +31,7 @@ class SimVPConfig(BaseModel):
         return (int(v[0]), int(v[1]), int(v[2]), int(v[3]))
 
     # [优化] 增加训练轮数以适配课程学习 Phase 3
-    max_epochs: int = Field(default=150, description="最大训练轮数")
+    max_epochs: int = Field(default=100, description="最大训练轮数")
 
     # 2. 数据加载器配置
     batch_size: int = Field(default=4, description="批大小 (单卡)")
