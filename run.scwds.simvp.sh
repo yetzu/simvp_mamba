@@ -36,7 +36,7 @@ case $MODE in
         python run/train_scwds_simvp.py \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
-            --batch_size 12 \
+            --batch_size 4 \
             --accumulate_grad_batches 2 \
             --num_workers 8 \
             \
