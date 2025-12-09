@@ -7,7 +7,7 @@
 # ================= 环境变量优化 =================
 export PYTHONPATH=$PYTHONPATH:$(pwd)
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
-export NCCL_P2P_DISABLE=0
+export NCCL_P2P_DISABLE=1
 export NCCL_IB_DISABLE=0
 export NCCL_DEBUG=WARN
 
@@ -36,9 +36,9 @@ case $MODE in
         python run/train_scwds_simvp.py \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
-            --batch_size 4 \
-            --accumulate_grad_batches 8 \
-            --num_workers 4 \
+            --batch_size 12 \
+            --accumulate_grad_batches 2 \
+            --num_workers 8 \
             \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
@@ -47,7 +47,7 @@ case $MODE in
             --lr 8e-4 \
             --sched cosine \
             --min_lr 1e-5 \
-            --warmup_epoch 2 \
+            --warmup_epoch 5 \
             \
             --model_type mamba \
             --hid_S 128 \
@@ -70,11 +70,12 @@ case $MODE in
             --devices 1,2,3\
             --precision bf16-mixed \
             --gradient_clip_val 0.5 \
-            --gradient_clip_algorithm norm
+            --gradient_clip_algorithm norm \
+            --ckpt_path ./output/simvp/last.ckpt
         ;;
         
     # ============================================================
-    # 2. 测试 SimVP 基座 - [保持原样]
+    # 2. 测试 SimVP 基座
     # ============================================================
     "test")
         echo "----------------------------------------"
@@ -87,7 +88,8 @@ case $MODE in
             --aft_seq_length 20 \
             --save_dir ./output/simvp \
             --num_samples 10 \
-            --accelerator cuda:0
+            --accelerator cuda \
+            --devices 1
         ;;
         
     # ============================================================

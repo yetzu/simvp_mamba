@@ -10,6 +10,10 @@ from pydantic import ValidationError
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
+import torch.multiprocessing
+# 将共享策略设置为 file_system，绕过 /dev/shm 限制
+torch.multiprocessing.set_sharing_strategy('file_system')
+
 import lightning as l
 from lightning.pytorch.loggers import TensorBoardLogger
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint, LearningRateMonitor
