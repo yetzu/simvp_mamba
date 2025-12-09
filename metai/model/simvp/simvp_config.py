@@ -77,8 +77,8 @@ class SimVPConfig(BaseModel):
     loss_weight_l1: float = Field(default=1.0, description="L1 Loss 权重")
     loss_weight_ssim: float = Field(default=0.5, description="MS-SSIM 权重")
     loss_weight_csi: float = Field(default=1.0, description="Soft-CSI 权重")
-    loss_weight_spectral: float = Field(default=0.1, description="Spectral 权重")
-    loss_weight_evo: float = Field(default=0.5, description="Evolution 权重")
+    loss_weight_spectral: float = Field(default=0.05, description="Spectral 权重")
+    loss_weight_evo: float = Field(default=0.2, description="Evolution 权重")
     
     # 6. 课程学习配置
     use_curriculum_learning: bool = Field(default=True, description="是否启用课程学习")

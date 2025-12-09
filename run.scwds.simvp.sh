@@ -36,8 +36,8 @@ case $MODE in
         python run/train_scwds_simvp.py \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
-            --batch_size 4 \
-            --accumulate_grad_batches 2 \
+            --batch_size 2 \
+            --accumulate_grad_batches 4 \
             --num_workers 8 \
             \
             --in_shape 10 54 256 256 \
@@ -50,12 +50,12 @@ case $MODE in
             --warmup_epoch 5 \
             \
             --model_type mamba \
-            --hid_S 128 \
-            --hid_T 512 \
+            --hid_S 256 \
+            --hid_T 1024 \
             --N_S 4 \
             --N_T 12 \
             --mlp_ratio 8.0 \
-            --drop 0.0 \
+            --drop 0.05 \
             --drop_path 0.1 \
             --spatio_kernel_enc 5 \
             --spatio_kernel_dec 5 \
@@ -67,11 +67,10 @@ case $MODE in
             --early_stop_monitor val_score \
             --early_stop_mode max \
             --accelerator cuda \
-            --devices 1,2,3\
+            --devices 0,1,2,3 \
             --precision bf16-mixed \
             --gradient_clip_val 0.5 \
-            --gradient_clip_algorithm norm \
-            --ckpt_path ./output/simvp/last.ckpt
+            --gradient_clip_algorithm norm
         ;;
         
     # ============================================================
@@ -88,8 +87,7 @@ case $MODE in
             --aft_seq_length 20 \
             --save_dir ./output/simvp \
             --num_samples 10 \
-            --accelerator cuda \
-            --devices 1
+            --accelerator cuda
         ;;
         
     # ============================================================
