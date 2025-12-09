@@ -169,27 +169,11 @@ def main():
             dirpath=config.save_dir, 
             filename="{epoch:02d}-{val_score:.4f}",
             monitor=monitor_metric,
-            save_top_k=3, 
+            save_top_k=-1, 
             mode=monitor_mode,
-            save_last=False 
-        ),
-        
-        # 3. 总是保存 last.ckpt (用于 Resume)
-        ModelCheckpoint(
-            dirpath=config.save_dir, 
-            filename="last",
-            save_top_k=0, 
-            save_last=True, 
+            save_last=True,
             every_n_epochs=1
         ),
-        
-        # 4. 定期保存 (每5轮)
-        ModelCheckpoint(
-            dirpath=config.save_dir, 
-            filename="periodic-{epoch:02d}",
-            every_n_epochs=5, 
-            save_top_k=-1 
-        ), 
         
         LearningRateMonitor(logging_interval="step")
     ]

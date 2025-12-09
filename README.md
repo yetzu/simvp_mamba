@@ -44,5 +44,11 @@ tensorboard --logdir ./output/meteo_mamba_a800 --port 6006
 nohup bash run.scwds.simvp.sh train > train_simvp_scwds.log 2>&1 &
 
 conda install -c conda-forge p7zip -y
-7za a -t7z 15.7z /home/dataset-local/SevereWeather_AI_2025/CP/TrainSet/15/ -mx=9 -mfb=273 -ms=on -mmt=on
+7za a -t7z 01.7z /home/dataset-local/SevereWeather_AI_2025/CP/TrainSet/01/ -mx=9 -mfb=273 -ms=on -mmt=on
 7za x 01.7z -o/tmp/restore/
+
+7za a -t7z 24.7z /home/dataset-local/SevereWeather_AI_2025/CP/TrainSet/24 -mx=9 -mfb=273 -ms=on -mmt=on
+
+nohup bash run.scwds.simvp.sh train > train_simvp_scwds.log 2>&1 &
+
+
