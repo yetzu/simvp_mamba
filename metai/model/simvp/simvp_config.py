@@ -66,7 +66,7 @@ class SimVPConfig(BaseModel):
     N_S: int = Field(default=4, description="空间编码器层数")
     N_T: int = Field(default=12, description="时序转换器层数") # 增加层数以捕捉长时依赖
     model_type: str = Field(default='mamba', description="时序模块类型")
-    mlp_ratio: float = Field(default=8.0, description="MLP 扩展比例")
+    mlp_ratio: float = Field(default=4.0, description="MLP 扩展比例")
     drop: float = Field(default=0.0, description="Dropout 比率")
     drop_path: float = Field(default=0.1, description="Drop Path 比率")
     spatio_kernel_enc: int = Field(default=5, description="编码器卷积核大小")
@@ -91,7 +91,7 @@ class SimVPConfig(BaseModel):
 
     # 8. 优化器与调度器
     opt: str = Field(default="adamw", description="优化器")
-    lr: float = Field(default=1e-3, description="初始学习率")
+    lr: float = Field(default=1e-4, description="初始学习率")
     weight_decay: float = Field(default=1e-2, description="权重衰减")
     filter_bias_and_bn: bool = Field(default=True, description="是否对 Bias 和 BN 层免除权重衰减")
     momentum: float = Field(default=0.9, description="SGD 动量")
