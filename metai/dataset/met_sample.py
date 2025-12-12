@@ -288,9 +288,9 @@ class MetSample:
         
         if is_train:
             target_data, target_mask = self.load_target_data()
-            return self.metadata, input_data, target_data, target_mask, input_mask
+            return self.metadata, input_data, target_data, input_mask, target_mask
         else:
-            return self.metadata, input_data, None, None, input_mask
+            return self.metadata, input_data, None, input_mask, None
     
     def _get_channel_limits(self, channel: Union[MetLabel, MetRadar, MetNwp, MetGis]) -> tuple[float, float]:
         return (
