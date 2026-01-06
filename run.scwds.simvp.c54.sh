@@ -88,8 +88,8 @@ case $MODE in
             --data_path data/samples.jsonl \
             --in_shape 10 54 256 256 \
             --aft_seq_length 20 \
-            --save_dir ./output/simvp \
-            --num_samples 10 \
+            --save_dir ./output/simvp.v1 \
+            --num_samples 100 \
             --accelerator cuda
         ;;
         

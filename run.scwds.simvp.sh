@@ -37,11 +37,10 @@ case $MODE in
         echo "--------------------------------------------------------"
         
         python run/train_scwds_simvp.py \
-            --ckpt_path ./output/simvp/last.ckpt \
             --data_path data/samples.jsonl \
             --save_dir ./output/simvp \
-            --batch_size 8 \
-            --accumulate_grad_batches 1 \
+            --batch_size 4 \
+            --accumulate_grad_batches 2 \
             --num_workers 4 \
             \
             --in_shape 10 9 256 256 \
@@ -89,7 +88,7 @@ case $MODE in
             --in_shape 10 9 256 256 \
             --aft_seq_length 20 \
             --save_dir ./output/simvp \
-            --num_samples 10 \
+            --num_samples 100 \
             --accelerator cuda
         ;;
         
